@@ -5,7 +5,7 @@
 // 前端的输入 / resize / 关闭命令。这样避免了在 `select!` 中同时可变借用 +
 // 不可变借用同一个 Channel —— 通过 `Channel::split()` 拆成读写两半实现。
 
-use std::sync::Arc;
+use std::{env, path::PathBuf, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use base64::Engine;
@@ -65,6 +65,40 @@ pub struct ConnectOpts {
     pub rows: u32,
 }
 
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+fn expand_home_path(path: &str) -> PathBuf {
+    if path == "~" {
+        return home_dir().unwrap_or_else(|| PathBuf::from(path));
+    }
+    if path.starts_with("~/") || path.starts_with("~\\") {
+        if let Some(home) = home_dir() {
+            return home.join(&path[2..]);
+        }
+    }
+    PathBuf::from(path)
+}
+
+#[tauri::command]
+pub fn default_private_key_path() -> String {
+    let candidates = [
+        "~/.ssh/id_rsa",
+        "~/.ssh/id_ed25519",
+        "~/.ssh/id_ecdsa",
+        "~/.ssh/id_dsa",
+    ];
+    candidates
+        .iter()
+        .copied()
+        .find(|path| expand_home_path(path).is_file())
+        .unwrap_or("~/.ssh/id_rsa")
+        .to_string()
+}
+
 #[tauri::command]
 pub async fn ssh_connect(
     app: AppHandle,
@@ -95,7 +129,11 @@ async fn connect_inner(app: AppHandle, state: State<'_, AppState>, opts: Connect
                 .private_key_path
                 .clone()
                 .ok_or_else(|| anyhow!("缺少私钥路径"))?;
-            let key = load_secret_key(&path, opts.passphrase.as_deref())?;
+            let expanded_path = expand_home_path(&path);
+            if !expanded_path.is_file() {
+                return Err(anyhow!("私钥文件不存在：{}", expanded_path.display()));
+            }
+            let key = load_secret_key(expanded_path, opts.passphrase.as_deref())?;
             let res = handle
                 .authenticate_publickey(
                     opts.username.as_str(),

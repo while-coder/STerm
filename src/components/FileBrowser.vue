@@ -4,12 +4,23 @@ import { ref, watch } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { sftpHome, sftpList, sftpDownload, sftpUpload, type FileEntry } from "../api";
 
-const props = defineProps<{ id: string; active: boolean }>();
+const props = defineProps<{
+  id: string;
+  connected: boolean;
+  autoHome: boolean;
+  followPath?: string;
+  followToken?: number;
+}>();
+const emit = defineEmits<{
+  cwdChanged: [path: string];
+  homeChanged: [path: string];
+}>();
 
 const cwd = ref("/");
 const entries = ref<FileEntry[]>([]);
 const loading = ref(false);
 const error = ref("");
+const homeLoaded = ref(false);
 
 async function refresh() {
   loading.value = true;
@@ -18,6 +29,23 @@ async function refresh() {
     entries.value = await sftpList(props.id, cwd.value);
   } catch (e) {
     error.value = String(e);
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function listPath(path: string): Promise<boolean> {
+  loading.value = true;
+  error.value = "";
+  try {
+    const next = await sftpList(props.id, path);
+    cwd.value = path;
+    entries.value = next;
+    emit("cwdChanged", cwd.value);
+    return true;
+  } catch (e) {
+    error.value = String(e);
+    return false;
   } finally {
     loading.value = false;
   }
@@ -39,13 +67,27 @@ function joinRemote(dir: string, name: string): string {
 
 function enter(entry: FileEntry) {
   if (!entry.isDir) return;
-  cwd.value = entry.path;
-  refresh();
+  void listPath(entry.path);
 }
 
 function goUp() {
-  cwd.value = parentOf(cwd.value);
-  refresh();
+  void listPath(parentOf(cwd.value));
+}
+
+async function loadPath(path: string) {
+  await listPath(path);
+}
+
+async function loadHome() {
+  let home = "/";
+  try {
+    home = await sftpHome(props.id);
+  } catch {
+    home = "/";
+  }
+  homeLoaded.value = true;
+  emit("homeChanged", home);
+  await listPath(home);
 }
 
 async function download(entry: FileEntry) {
@@ -76,19 +118,30 @@ function fmtSize(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
-// 连接就绪后定位到家目录并加载。
+// 连接就绪后可自动定位到家目录并加载。
 watch(
-  () => props.active,
-  async (on) => {
-    if (!on) return;
-    try {
-      cwd.value = await sftpHome(props.id);
-    } catch {
-      cwd.value = "/";
-    }
-    refresh();
+  () => props.connected,
+  async (connected) => {
+    if (!connected || !props.autoHome || homeLoaded.value) return;
+    await loadHome();
   },
   { immediate: true }
+);
+
+watch(
+  () => props.autoHome,
+  async (autoHome) => {
+    if (!props.connected || !autoHome || homeLoaded.value) return;
+    await loadHome();
+  }
+);
+
+watch(
+  () => props.followToken,
+  async () => {
+    if (!props.connected || !props.followPath) return;
+    await loadPath(props.followPath);
+  }
 );
 </script>
 
@@ -126,8 +179,8 @@ watch(
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: #252526;
-  color: #d4d4d4;
+  background: var(--surface, #252526);
+  color: var(--text, #d4d4d4);
   font-size: 13px;
 }
 .toolbar {
@@ -135,22 +188,22 @@ watch(
   align-items: center;
   gap: 6px;
   padding: 6px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--line, #333);
 }
 .toolbar button {
-  background: #333;
-  color: #d4d4d4;
+  background: var(--surface-3, #333);
+  color: var(--text, #d4d4d4);
   border: none;
   border-radius: 4px;
   padding: 3px 8px;
   cursor: pointer;
 }
 .toolbar button:hover {
-  background: #444;
+  background: var(--surface-2, #444);
 }
 .cwd {
   margin-left: 6px;
-  opacity: 0.8;
+  color: var(--muted, rgba(212, 212, 212, 0.8));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -173,14 +226,14 @@ tr.dir .name {
   color: #4ec9b0;
 }
 .name:hover {
-  background: #2a2d2e;
+  background: var(--surface-2, #2a2d2e);
 }
 .icon {
   margin-right: 6px;
 }
 .size {
   text-align: right;
-  opacity: 0.7;
+  color: var(--muted, rgba(212, 212, 212, 0.7));
   white-space: nowrap;
 }
 .act button {
@@ -195,6 +248,6 @@ tr.dir .name {
 }
 .hint {
   padding: 10px;
-  opacity: 0.6;
+  color: var(--muted, rgba(212, 212, 212, 0.6));
 }
 </style>

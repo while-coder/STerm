@@ -11,6 +11,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            ssh::default_private_key_path,
             ssh::ssh_connect,
             ssh::ssh_write,
             ssh::ssh_resize,

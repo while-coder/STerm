@@ -16,6 +16,19 @@ export interface ConnectOpts {
   rows: number;
 }
 
+export interface SavedConnection {
+  id: string;
+  label: string;
+  host: string;
+  port: number;
+  username: string;
+  auth: AuthMethod;
+  privateKeyPath?: string;
+  remember: boolean;
+  password?: string;
+  passphrase?: string;
+}
+
 export interface FileEntry {
   name: string;
   path: string;
@@ -29,6 +42,7 @@ export const sshWrite = (id: string, data: string) => invoke<void>("ssh_write", 
 export const sshResize = (id: string, cols: number, rows: number) =>
   invoke<void>("ssh_resize", { id, cols, rows });
 export const sshDisconnect = (id: string) => invoke<void>("ssh_disconnect", { id });
+export const defaultPrivateKeyPath = () => invoke<string>("default_private_key_path");
 
 export const sftpHome = (id: string) => invoke<string>("sftp_home", { id });
 export const sftpList = (id: string, path: string) =>
