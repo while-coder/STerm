@@ -130,3 +130,38 @@ async fn upload_inner(entry: &SessionEntry, local: &str, remote: &str) -> Result
     dst.shutdown().await?; // 确保刷新并关闭远端文件
     Ok(())
 }
+
+#[tauri::command]
+pub async fn sftp_mkdir(state: State<'_, AppState>, id: String, path: String) -> Result<(), String> {
+    let entry = fetch_entry(&state, &id).await?;
+    let sftp = get_sftp(&entry).await.map_err(|e| e.to_string())?;
+    sftp.create_dir(path).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sftp_rename(
+    state: State<'_, AppState>,
+    id: String,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    let entry = fetch_entry(&state, &id).await?;
+    let sftp = get_sftp(&entry).await.map_err(|e| e.to_string())?;
+    sftp.rename(from, to).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sftp_remove(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    is_dir: bool,
+) -> Result<(), String> {
+    let entry = fetch_entry(&state, &id).await?;
+    let sftp = get_sftp(&entry).await.map_err(|e| e.to_string())?;
+    if is_dir {
+        sftp.remove_dir(path).await.map_err(|e| e.to_string())
+    } else {
+        sftp.remove_file(path).await.map_err(|e| e.to_string())
+    }
+}

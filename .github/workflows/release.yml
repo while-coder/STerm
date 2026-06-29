@@ -1,0 +1,254 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # 探测可选 secrets 是否配置，输出开关给后续 job。
+  # （secrets 不能直接用于 job 级 if，需经此 job 转成 outputs）
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      ios: ${{ steps.detect.outputs.ios }}
+      android_signed: ${{ steps.detect.outputs.android_signed }}
+    steps:
+      - id: detect
+        env:
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+        run: |
+          if [ -n "$IOS_CERTIFICATE" ]; then
+            echo "ios=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ios=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$ANDROID_KEY_BASE64" ]; then
+            echo "android_signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "android_signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # 桌面三平台（参照 sbox），同时负责创建 draft release。
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: '--target aarch64-apple-darwin'
+            rust-target: aarch64-apple-darwin
+          - platform: macos-latest
+            args: '--target x86_64-apple-darwin'
+            rust-target: x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            args: ''
+            rust-target: ''
+          - platform: windows-latest
+            args: ''
+            rust-target: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ matrix.platform }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.platform }}-cargo-
+
+      - name: Install Linux deps
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Extract release notes
+        id: notes
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BODY=$(awk -v v="$VERSION" '
+            $1 == "##" && $2 == v { capture=1; next }
+            capture && $1 == "##" { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          [ -z "$BODY" ] && BODY="Release $VERSION"
+          {
+            echo "body<<RELEASE_NOTES_EOF"
+            echo "$BODY"
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: 'STerm v__VERSION__'
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+  # Android：CI 内 init → 注入签名（可选）→ build APK → 上传到 release。
+  android:
+    needs: [check, desktop]
+    if: ${{ !cancelled() && needs.desktop.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager "ndk;27.0.11902837"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.11902837" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: android-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            android-cargo-
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Init Android project
+        run: pnpm tauri android init
+
+      - name: Setup Android signing
+        if: ${{ needs.check.outputs.android_signed == 'true' }}
+        env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+        run: bash scripts/setup-android-signing.sh
+
+      - name: Build APK
+        run: pnpm tauri android build --apk
+
+      - name: Upload APK to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n1)
+          if [ -z "$APK" ]; then
+            echo "::error::未找到构建出的 APK"
+            exit 1
+          fi
+          DEST="STerm_${TAG#v}.apk"
+          cp "$APK" "$DEST"
+          gh release upload "$TAG" "$DEST" -R "${{ github.repository }}" --clobber
+
+  # iOS：仅在配置了签名 secrets 时运行（由 check job 决定）。
+  ios:
+    needs: [check, desktop]
+    if: ${{ !cancelled() && needs.desktop.result == 'success' && needs.check.outputs.ios == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ios-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ios-cargo-
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Init iOS project
+        run: pnpm tauri ios init
+
+      - name: Build iOS app
+        env:
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+        run: pnpm tauri ios build --export-method ad-hoc
+
+      - name: Upload IPA to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          IPA=$(find src-tauri/gen/apple/build -name '*.ipa' | head -n1)
+          if [ -z "$IPA" ]; then
+            echo "::error::未找到构建出的 IPA"
+            exit 1
+          fi
+          DEST="STerm_${TAG#v}.ipa"
+          cp "$IPA" "$DEST"
+          gh release upload "$TAG" "$DEST" -R "${{ github.repository }}" --clobber

@@ -8,6 +8,10 @@ export interface AppSettings {
   showSftp: boolean;
   sftpFollowSsh: boolean;
   sftpAutoHome: boolean;
+  /** 侧边栏折叠（仅桌面布局生效）。 */
+  sidebarCollapsed: boolean;
+  /** SFTP 面板宽度（桌面，px）。 */
+  sftpPanelWidth: number;
 }
 
 const CONNECTIONS_KEY = "sterm.connections";
@@ -17,6 +21,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   showSftp: true,
   sftpFollowSsh: true,
   sftpAutoHome: true,
+  sidebarCollapsed: false,
+  sftpPanelWidth: 340,
 };
 
 export function loadConnections(): SavedConnection[] {

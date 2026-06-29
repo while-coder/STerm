@@ -1,0 +1,80 @@
+/* 统一设计 token：颜色（深/浅两套）、间距 / 圆角 / 字号比例尺、移动端安全区与触控尺寸。
+   组件统一引用这些变量，主题切换只需在 :root 切换 data-theme。 */
+
+:root {
+  /* 深色（默认） */
+  --bg: #1e1e1e;
+  --surface: #252525;
+  --surface-2: #2a2a2a;
+  --surface-3: #333333;
+  --line: #444444;
+  --text: #eaeaea;
+  --muted: rgba(234, 234, 234, 0.62);
+  --accent: #0e639c;
+  --accent-hover: #1177bb;
+  --accent-soft: rgba(14, 99, 156, 0.18);
+  --danger: #d16969;
+  --danger-bg: #3a2525;
+  --ok: #2bd576;
+  --warn: #f48771;
+  --terminal-bg: #1e1e1e;
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.32);
+  --overlay: rgba(0, 0, 0, 0.48);
+
+  /* 间距比例尺 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* 圆角 */
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+
+  /* 字号 */
+  --fs-xs: 0.72rem;
+  --fs-sm: 0.82rem;
+  --fs-md: 0.95rem;
+  --fs-lg: 1.1rem;
+  --fs-xl: 1.6rem;
+  --fs-2xl: 2.2rem;
+
+  /* 布局度量 */
+  --sidebar-w: 264px;
+  --sidebar-collapsed-w: 0px;
+  --topbar-h: 40px;
+  --hit: 44px; /* 移动端最小触控目标 */
+
+  /* 安全区（移动端刘海 / 手势条） */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #f1f3f5;
+  --surface-3: #e9ecef;
+  --line: #d0d7de;
+  --text: #1f2328;
+  --muted: rgba(31, 35, 40, 0.62);
+  --accent: #0e639c;
+  --accent-hover: #1177bb;
+  --accent-soft: rgba(14, 99, 156, 0.12);
+  --danger: #c44545;
+  --danger-bg: #fbeaea;
+  --ok: #1f9d57;
+  --warn: #c2410c;
+  --terminal-bg: #ffffff;
+  --shadow: 0 18px 50px rgba(15, 23, 42, 0.18);
+  --overlay: rgba(15, 23, 42, 0.32);
+
+  color-scheme: light;
+}

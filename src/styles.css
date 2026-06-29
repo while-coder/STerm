@@ -1,7 +1,9 @@
+@import "./styles/tokens.css";
+
 :root {
   font-family: Inter, "Segoe UI", Avenir, Helvetica, Arial, sans-serif;
-  color: #eaeaea;
-  background-color: #1e1e1e;
+  color: var(--text);
+  background-color: var(--bg);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -18,4 +20,6 @@ body,
 
 body {
   overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
 }

@@ -1,8 +1,21 @@
 <script setup lang="ts">
-// SFTP 文件浏览器：列目录、进入子目录、上传 / 下载。
-import { ref, watch } from "vue";
+// SFTP 文件浏览器：面包屑导航、列目录、进入子目录、新建文件夹 / 重命名 / 删除、上传 / 下载、拖拽上传。
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { sftpHome, sftpList, sftpDownload, sftpUpload, type FileEntry } from "../api";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import {
+  sftpHome,
+  sftpList,
+  sftpDownload,
+  sftpUpload,
+  sftpMkdir,
+  sftpRename,
+  sftpRemove,
+  type FileEntry,
+} from "../api";
+import { useLongPress } from "../composables/useLongPress";
+import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
 
 const props = defineProps<{
   id: string;
@@ -21,18 +34,54 @@ const entries = ref<FileEntry[]>([]);
 const loading = ref(false);
 const error = ref("");
 const homeLoaded = ref(false);
+const dragOver = ref(false);
 
-async function refresh() {
-  loading.value = true;
-  error.value = "";
-  try {
-    entries.value = await sftpList(props.id, cwd.value);
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    loading.value = false;
-  }
+// 右键 / 长按上下文菜单。
+const lp = useLongPress();
+const menu = ref<{ open: boolean; x: number; y: number; entry: FileEntry | null }>({
+  open: false,
+  x: 0,
+  y: 0,
+  entry: null,
+});
+const menuItems = computed<MenuItem[]>(() => {
+  const e = menu.value.entry;
+  if (!e) return [];
+  const items: MenuItem[] = [];
+  if (!e.isDir) items.push({ key: "download", label: "下载" });
+  items.push({ key: "rename", label: "重命名" });
+  items.push({ key: "delete", label: "删除", danger: true });
+  return items;
+});
+function openMenuAt(e: MouseEvent | PointerEvent, entry: FileEntry) {
+  menu.value = { open: true, x: e.clientX, y: e.clientY, entry };
 }
+function onMenuSelect(key: string) {
+  const entry = menu.value.entry;
+  if (!entry) return;
+  if (key === "download") void download(entry);
+  else if (key === "rename") openRename(entry);
+  else if (key === "delete") openDelete(entry);
+}
+function onNameClick(entry: FileEntry) {
+  if (lp.suppressed.value) return;
+  enter(entry);
+}
+
+// 输入对话框（新建文件夹 / 重命名 / 删除确认）。
+type Ask = { mode: "mkdir" | "rename" | "delete"; title: string; value: string; entry?: FileEntry };
+const ask = ref<Ask | null>(null);
+
+const crumbs = computed(() => {
+  const parts = cwd.value.split("/").filter(Boolean);
+  const acc: { name: string; path: string }[] = [{ name: "/", path: "/" }];
+  let cur = "";
+  for (const p of parts) {
+    cur += `/${p}`;
+    acc.push({ name: p, path: cur });
+  }
+  return acc;
+});
 
 async function listPath(path: string): Promise<boolean> {
   loading.value = true;
@@ -51,6 +100,10 @@ async function listPath(path: string): Promise<boolean> {
   }
 }
 
+function refresh() {
+  void listPath(cwd.value);
+}
+
 function parentOf(path: string): string {
   const p = path.replace(/\/+$/, "");
   const i = p.lastIndexOf("/");
@@ -66,16 +119,11 @@ function joinRemote(dir: string, name: string): string {
 }
 
 function enter(entry: FileEntry) {
-  if (!entry.isDir) return;
-  void listPath(entry.path);
+  if (entry.isDir) void listPath(entry.path);
 }
 
 function goUp() {
   void listPath(parentOf(cwd.value));
-}
-
-async function loadPath(path: string) {
-  await listPath(path);
 }
 
 async function loadHome() {
@@ -100,14 +148,58 @@ async function download(entry: FileEntry) {
   }
 }
 
-async function upload() {
-  const local = await open({ multiple: false });
-  if (!local || typeof local !== "string") return;
+async function uploadFrom(localPaths: string[]) {
+  error.value = "";
+  for (const local of localPaths) {
+    try {
+      await sftpUpload(props.id, local, joinRemote(cwd.value, basename(local)));
+    } catch (e) {
+      error.value = String(e);
+    }
+  }
+  refresh();
+}
+
+async function pickUpload() {
+  const local = await open({ multiple: true });
+  if (!local) return;
+  await uploadFrom(Array.isArray(local) ? local : [local]);
+}
+
+// —— 输入对话框 ——
+function openMkdir() {
+  ask.value = { mode: "mkdir", title: "新建文件夹", value: "" };
+}
+function openRename(entry: FileEntry) {
+  ask.value = { mode: "rename", title: "重命名", value: entry.name, entry };
+}
+function openDelete(entry: FileEntry) {
+  ask.value = { mode: "delete", title: `删除 ${entry.name}？`, value: "", entry };
+}
+
+async function confirmAsk() {
+  const a = ask.value;
+  if (!a) return;
   try {
-    await sftpUpload(props.id, local, joinRemote(cwd.value, basename(local)));
-    await refresh();
+    if (a.mode === "mkdir") {
+      const name = a.value.trim();
+      if (!name) return;
+      await sftpMkdir(props.id, joinRemote(cwd.value, name));
+    } else if (a.mode === "rename" && a.entry) {
+      const name = a.value.trim();
+      if (!name || name === a.entry.name) {
+        ask.value = null;
+        return;
+      }
+      await sftpRename(props.id, a.entry.path, joinRemote(parentOf(a.entry.path), name));
+    } else if (a.mode === "delete" && a.entry) {
+      await sftpRemove(props.id, a.entry.path, a.entry.isDir);
+    }
+    ask.value = null;
+    refresh();
   } catch (e) {
     error.value = String(e);
+    ask.value = null;
   }
 }
 
@@ -118,7 +210,27 @@ function fmtSize(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
-// 连接就绪后可自动定位到家目录并加载。
+// —— Tauri webview 原生文件拖拽（携带本地路径）——
+let unlistenDrop: UnlistenFn | null = null;
+onMounted(async () => {
+  try {
+    unlistenDrop = await getCurrentWebview().onDragDropEvent((e) => {
+      const p = e.payload;
+      if (p.type === "over" || p.type === "enter") {
+        dragOver.value = true;
+      } else if (p.type === "drop") {
+        dragOver.value = false;
+        if (props.connected && p.paths?.length) void uploadFrom(p.paths);
+      } else {
+        dragOver.value = false;
+      }
+    });
+  } catch {
+    /* 移动端 / 不支持时静默 */
+  }
+});
+onBeforeUnmount(() => unlistenDrop?.());
+
 watch(
   () => props.connected,
   async (connected) => {
@@ -140,114 +252,291 @@ watch(
   () => props.followToken,
   async () => {
     if (!props.connected || !props.followPath) return;
-    await loadPath(props.followPath);
+    await listPath(props.followPath);
   }
 );
 </script>
 
 <template>
-  <div class="fb">
+  <div class="fb" :class="{ 'drag-over': dragOver }">
     <div class="toolbar">
-      <button @click="goUp" title="上级目录">⬆</button>
-      <button @click="refresh" title="刷新">⟳</button>
-      <button @click="upload" title="上传文件">⬆ 上传</button>
-      <span class="cwd" :title="cwd">{{ cwd }}</span>
+      <button class="tb" type="button" title="上级目录" @click="goUp">⬆</button>
+      <button class="tb" type="button" title="刷新" @click="refresh">⟳</button>
+      <button class="tb" type="button" title="新建文件夹" @click="openMkdir">＋📁</button>
+      <button class="tb" type="button" title="上传文件" @click="pickUpload">⬆ 上传</button>
     </div>
+
+    <nav class="crumbs">
+      <button
+        v-for="(c, i) in crumbs"
+        :key="c.path"
+        class="crumb"
+        type="button"
+        @click="listPath(c.path)"
+      >
+        <span v-if="i > 0" class="sep">/</span>{{ c.name }}
+      </button>
+    </nav>
+
     <div v-if="error" class="error">{{ error }}</div>
+
     <div class="list">
-      <table>
-        <tbody>
-          <tr v-for="e in entries" :key="e.path" :class="{ dir: e.isDir }">
-            <td class="name" @click="enter(e)">
-              <span class="icon">{{ e.isDir ? "📁" : "📄" }}</span>{{ e.name }}
-            </td>
-            <td class="size">{{ e.isDir ? "" : fmtSize(e.size) }}</td>
-            <td class="act">
-              <button v-if="!e.isDir" @click="download(e)" title="下载">⬇</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      <div
+        v-for="e in entries"
+        :key="e.path"
+        class="row"
+        :class="{ dir: e.isDir }"
+        @contextmenu.prevent="openMenuAt($event, e)"
+      >
+        <button
+          class="name"
+          type="button"
+          @click="onNameClick(e)"
+          @pointerdown="lp.start($event, (ev) => openMenuAt(ev, e))"
+          @pointermove="lp.move"
+          @pointerup="lp.end"
+          @pointercancel="lp.end"
+        >
+          <span class="icon">{{ e.isDir ? "📁" : "📄" }}</span>
+          <span class="label">{{ e.name }}</span>
+        </button>
+        <span class="size">{{ e.isDir ? "" : fmtSize(e.size) }}</span>
+        <button class="rb" type="button" title="操作" @click="openMenuAt($event, e)">⋯</button>
+      </div>
       <div v-if="loading" class="hint">加载中…</div>
       <div v-else-if="!entries.length" class="hint">（空目录）</div>
+    </div>
+
+    <div v-if="dragOver" class="drop-mask">松开以上传到 {{ cwd }}</div>
+
+    <ContextMenu
+      :open="menu.open"
+      :x="menu.x"
+      :y="menu.y"
+      :items="menuItems"
+      @select="onMenuSelect"
+      @close="menu.open = false"
+    />
+
+    <div v-if="ask" class="ask-backdrop" @click.self="ask = null">
+      <div class="ask">
+        <div class="ask-title">{{ ask.title }}</div>
+        <input
+          v-if="ask.mode !== 'delete'"
+          v-model="ask.value"
+          placeholder="名称"
+          @keydown.enter="confirmAsk"
+        />
+        <div class="ask-actions">
+          <button type="button" @click="ask = null">取消</button>
+          <button
+            type="button"
+            class="primary"
+            :class="{ danger: ask.mode === 'delete' }"
+            @click="confirmAsk"
+          >
+            {{ ask.mode === "delete" ? "删除" : "确定" }}
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
 .fb {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--surface, #252526);
-  color: var(--text, #d4d4d4);
-  font-size: 13px;
+  min-height: 0;
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-sm);
 }
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px;
-  border-bottom: 1px solid var(--line, #333);
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  border-bottom: 1px solid var(--line);
 }
-.toolbar button {
-  background: var(--surface-3, #333);
-  color: var(--text, #d4d4d4);
-  border: none;
-  border-radius: 4px;
-  padding: 3px 8px;
+.tb {
+  min-height: 30px;
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
   cursor: pointer;
 }
-.toolbar button:hover {
-  background: var(--surface-2, #444);
+.tb:hover {
+  background: var(--surface-2);
 }
-.cwd {
-  margin-left: 6px;
-  color: var(--muted, rgba(212, 212, 212, 0.8));
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: var(--sp-1) var(--sp-2);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+.crumb {
+  border: 0;
+  padding: 2px;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.crumb:hover {
+  color: var(--text);
+}
+.crumb:last-child {
+  color: var(--text);
+  font-weight: 600;
+}
+.sep {
+  margin: 0 2px;
+  color: var(--muted);
+}
+.list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-2);
+  min-height: 34px;
+}
+.row:hover {
+  background: var(--surface-2);
+}
+.name {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: var(--sp-1) 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.row.dir .name .label {
+  color: #4ec9b0;
+}
+.label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.list {
-  flex: 1;
-  overflow: auto;
-}
-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-td {
-  padding: 3px 6px;
-}
-.name {
-  cursor: pointer;
-}
-tr.dir .name {
-  color: #4ec9b0;
-}
-.name:hover {
-  background: var(--surface-2, #2a2d2e);
-}
 .icon {
-  margin-right: 6px;
+  flex: 0 0 auto;
 }
 .size {
-  text-align: right;
-  color: var(--muted, rgba(212, 212, 212, 0.7));
+  flex: 0 0 auto;
+  color: var(--muted);
   white-space: nowrap;
+  font-size: var(--fs-xs);
 }
-.act button {
+.rb {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--radius-sm);
   background: transparent;
-  border: none;
-  color: #569cd6;
+  color: var(--muted);
+  font-size: 16px;
   cursor: pointer;
 }
-.error {
-  color: #f48771;
-  padding: 6px;
+.rb:hover {
+  background: var(--surface-3);
+  color: var(--text);
 }
 .hint {
-  padding: 10px;
-  color: var(--muted, rgba(212, 212, 212, 0.6));
+  padding: var(--sp-3);
+  color: var(--muted);
+}
+.error {
+  padding: var(--sp-2);
+  color: var(--warn);
+}
+.fb.drag-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+.drop-mask {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-soft);
+  color: var(--text);
+  pointer-events: none;
+}
+.ask-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+  background: var(--overlay);
+}
+.ask {
+  width: 100%;
+  max-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+.ask-title {
+  font-weight: 600;
+}
+.ask input {
+  min-height: 36px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.ask-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+.ask-actions button {
+  min-height: 34px;
+  padding: 0 var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  color: var(--text);
+  cursor: pointer;
+}
+.ask-actions .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.ask-actions .primary.danger {
+  background: var(--danger);
+  border-color: var(--danger);
 }
 </style>

@@ -7,6 +7,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import { sshConnect, sshWrite, sshResize, sshDisconnect, type ConnectOpts } from "../api";
+import { useResponsive } from "../composables/useResponsive";
 
 type TerminalThemeMode = "dark" | "light";
 
@@ -19,15 +20,18 @@ const emit = defineEmits<{
   connected: [];
   error: [msg: string];
   closed: [];
-  cwdCommand: [path: string];
+  cwd: [path: string];
 }>();
 
+const { isMobile } = useResponsive();
 const host = ref<HTMLDivElement | null>(null);
 let term: Terminal | null = null;
 let fit: FitAddon | null = null;
 const unlisten: UnlistenFn[] = [];
-let inputBuffer = "";
-let ignoreNextLf = false;
+const ctrlArmed = ref(false);
+let disposeOsc7: (() => void) | null = null;
+// OSC 7 上报去重：仅当真实 cwd 变化时才通知上层，避免每个提示符都触发跟随。
+let lastCwd = "";
 
 function terminalTheme(mode: TerminalThemeMode = "dark") {
   return mode === "light"
@@ -43,88 +47,42 @@ function b64ToBytes(b64: string): Uint8Array {
   return arr;
 }
 
-function shellWords(command: string): string[] {
-  const words: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  let escaped = false;
-  for (const ch of command) {
-    if (escaped) {
-      current += ch;
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (ch === quote) {
-        quote = null;
-      } else {
-        current += ch;
-      }
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      if (current) {
-        words.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += ch;
+/**
+ * 解析 OSC 7 序列的负载 `file://host/path`，返回其中的绝对路径（URL 解码）。
+ * 无法识别时返回 null。
+ */
+function parseOsc7(data: string): string | null {
+  if (!data.startsWith("file://")) return null;
+  const rest = data.slice("file://".length);
+  const slash = rest.indexOf("/");
+  if (slash < 0) return null;
+  const raw = rest.slice(slash);
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
   }
-  if (current) words.push(current);
-  return words;
 }
 
-function extractCdTarget(command: string): string | null {
-  const trimmed = command.trim();
-  if (!trimmed || /[;&|`$()]/.test(trimmed)) return null;
-  const words = shellWords(trimmed);
-  if (words[0] !== "cd") return null;
-  const target = words.find((word, index) => index > 0 && word !== "--");
-  if (!target || target === "-") return target === undefined ? "~" : null;
-  return target;
-}
-
-function submitInputBuffer() {
-  const target = extractCdTarget(inputBuffer);
-  inputBuffer = "";
-  if (target) emit("cwdCommand", target);
-}
-
-function trackInput(data: string) {
-  for (const ch of data) {
-    if (ch === "\r") {
-      submitInputBuffer();
-      ignoreNextLf = true;
-      continue;
-    }
-    if (ch === "\n") {
-      if (ignoreNextLf) {
-        ignoreNextLf = false;
-      } else {
-        submitInputBuffer();
-      }
-      continue;
-    }
-    ignoreNextLf = false;
-    if (ch === "\u007f" || ch === "\b") {
-      inputBuffer = inputBuffer.slice(0, -1);
-      continue;
-    }
-    if (ch === "\u0003" || ch === "\u0015") {
-      inputBuffer = "";
-      continue;
-    }
-    if (ch >= " ") inputBuffer += ch;
+/** 特殊键工具条：Ctrl 为待命修饰键，其余直接注入对应控制序列。 */
+function sendKey(key: string) {
+  if (key === "ctrl") {
+    ctrlArmed.value = !ctrlArmed.value;
+    term?.focus();
+    return;
   }
+  const seqs: Record<string, string> = {
+    esc: "",
+    tab: "\t",
+    "ctrl-c": "",
+    up: "[A",
+    down: "[B",
+    left: "[D",
+    right: "[C",
+  };
+  const seq = seqs[key];
+  if (seq) void sshWrite(props.opts.id, seq);
+  term?.focus();
 }
 
 onMounted(async () => {
@@ -147,9 +105,27 @@ onMounted(async () => {
   );
   unlisten.push(await listen(`terminal-closed-${id}`, () => emit("closed")));
 
-  // 输入与尺寸变化。
+  // OSC 7：远端 shell 在每个提示符前汇报真实工作目录，去重后通知上层驱动 SFTP 跟随。
+  const osc7 = term.parser.registerOscHandler(7, (data) => {
+    const path = parseOsc7(data);
+    if (path && path !== lastCwd) {
+      lastCwd = path;
+      emit("cwd", path);
+    }
+    return true; // 已处理，吞掉该序列不再交给终端渲染。
+  });
+  disposeOsc7 = () => osc7.dispose();
+
+  // 输入与尺寸变化。Ctrl 待命时把下一个字母转为控制码（移动端特殊键条用）。
   term.onData((d) => {
-    trackInput(d);
+    if (ctrlArmed.value && d.length === 1) {
+      const code = d.toLowerCase().charCodeAt(0);
+      if (code >= 97 && code <= 122) {
+        ctrlArmed.value = false;
+        return void sshWrite(id, String.fromCharCode(code - 96));
+      }
+      ctrlArmed.value = false;
+    }
     void sshWrite(id, d);
   });
   term.onResize(({ cols, rows }) => void sshResize(id, cols, rows));
@@ -188,6 +164,7 @@ watch(
 
 onBeforeUnmount(() => {
   ro.disconnect();
+  disposeOsc7?.();
   unlisten.forEach((fn) => fn());
   void sshDisconnect(props.opts.id);
   term?.dispose();
@@ -195,15 +172,58 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="host" class="terminal"></div>
+  <div class="term-wrap">
+    <div ref="host" class="terminal"></div>
+    <div v-if="isMobile" class="keybar">
+      <button type="button" @click="sendKey('esc')">Esc</button>
+      <button type="button" @click="sendKey('tab')">Tab</button>
+      <button type="button" :class="{ armed: ctrlArmed }" @click="sendKey('ctrl')">Ctrl</button>
+      <button type="button" @click="sendKey('ctrl-c')">^C</button>
+      <button type="button" @click="sendKey('left')">←</button>
+      <button type="button" @click="sendKey('up')">↑</button>
+      <button type="button" @click="sendKey('down')">↓</button>
+      <button type="button" @click="sendKey('right')">→</button>
+    </div>
+  </div>
 </template>
 
 <style scoped>
-.terminal {
+.term-wrap {
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
+  min-height: 0;
+}
+.terminal {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
   background: var(--terminal-bg, #1e1e1e);
   padding: 4px;
   box-sizing: border-box;
+}
+.keybar {
+  display: flex;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2) calc(var(--sp-1) + var(--safe-bottom));
+  background: var(--surface-2);
+  border-top: 1px solid var(--line);
+  overflow-x: auto;
+}
+.keybar button {
+  flex: 1 0 auto;
+  min-width: 44px;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.keybar button.armed {
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 </style>

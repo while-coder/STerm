@@ -28,6 +28,18 @@ pub enum ShellCmd {
     Close,
 }
 
+/// 连接建立后注入的 shell 配置：让 bash / zsh 在每个提示符前用 OSC 7
+/// 转义序列汇报真实工作目录（`ESC ] 7 ; file://host/path BEL`），供前端捕获以驱动
+/// SFTP 跟随。`printf` 中的 `\033` / `\a` 由远端 shell 解释为 ESC / BEL（故用裸反斜杠，
+/// 这里用 raw string 保留）。行首空格尽量避免该命令进入 shell 历史。幂等：已注入则不重复追加。
+const OSC7_SETUP: &str = concat!(
+    r#" __sterm7(){ printf '\033]7;file://%s%s\a' "${HOSTNAME:-localhost}" "$PWD"; }; "#,
+    r#"if [ -n "$ZSH_VERSION" ]; then typeset -ga precmd_functions; precmd_functions+=(__sterm7); "#,
+    r#"elif [ -n "$BASH_VERSION" ]; then case "$PROMPT_COMMAND" in *__sterm7*) ;; *) "#,
+    r#"PROMPT_COMMAND="__sterm7${PROMPT_COMMAND:+;$PROMPT_COMMAND}";; esac; fi"#,
+    "\n",
+);
+
 /// SSH 客户端回调。首版接受所有主机密钥。
 pub struct ClientHandler;
 
@@ -162,6 +174,8 @@ async fn connect_inner(app: AppHandle, state: State<'_, AppState>, opts: Connect
     let app2 = app.clone();
     tokio::spawn(async move {
         let (mut read_half, write_half) = channel.split();
+        // 注入 OSC 7 上报配置，使前端能拿到 shell 的真实 cwd。
+        let _ = write_half.data(OSC7_SETUP.as_bytes()).await;
         let out_event = format!("terminal-output-{id}");
         let engine = base64::engine::general_purpose::STANDARD;
         loop {

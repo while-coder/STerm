@@ -27,6 +27,10 @@ export interface SavedConnection {
   remember: boolean;
   password?: string;
   passphrase?: string;
+  /** 分组名（空 / undefined 归入「未分组」）。 */
+  group?: string;
+  /** 收藏置顶。 */
+  favorite?: boolean;
 }
 
 export interface FileEntry {
@@ -51,3 +55,9 @@ export const sftpDownload = (id: string, remotePath: string, localPath: string) 
   invoke<void>("sftp_download", { id, remotePath, localPath });
 export const sftpUpload = (id: string, localPath: string, remotePath: string) =>
   invoke<void>("sftp_upload", { id, localPath, remotePath });
+export const sftpMkdir = (id: string, path: string) =>
+  invoke<void>("sftp_mkdir", { id, path });
+export const sftpRename = (id: string, from: string, to: string) =>
+  invoke<void>("sftp_rename", { id, from, to });
+export const sftpRemove = (id: string, path: string, isDir: boolean) =>
+  invoke<void>("sftp_remove", { id, path, isDir });
