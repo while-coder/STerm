@@ -20,6 +20,8 @@ export interface AppSettings {
   termFontSize: number;
   /** 终端字体（CSS font-family）。 */
   termFontFamily: string;
+  /** 并行传输上限（同时进行的上传 / 下载数）。 */
+  maxParallelTransfers: number;
 }
 
 const CONNECTIONS_KEY = "sterm.connections";
@@ -35,6 +37,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   termColorScheme: "auto",
   termFontSize: 14,
   termFontFamily: "Consolas, 'Courier New', monospace",
+  maxParallelTransfers: 2,
 };
 
 export function loadConnections(): SavedConnection[] {

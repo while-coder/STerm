@@ -16,10 +16,12 @@ import {
   type FileEntry,
 } from "../api";
 import { useLongPress } from "../composables/useLongPress";
+import { useTransfers } from "../composables/useTransfers";
 import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
 
 const props = defineProps<{
   id: string;
+  sessionLabel?: string;
   connected: boolean;
   autoHome: boolean;
   followPath?: string;
@@ -36,6 +38,33 @@ const loading = ref(false);
 const error = ref("");
 const homeLoaded = ref(false);
 const dragOver = ref(false);
+
+const { transfers, enqueue, cancel: cancelTransfer, clearFinished } = useTransfers();
+const showTransfers = ref(false);
+const onlyCurrentSession = ref(true);
+const activeCount = computed(
+  () => transfers.value.filter((t) => t.status === "queued" || t.status === "running").length
+);
+const visibleTransfers = computed(() =>
+  onlyCurrentSession.value
+    ? transfers.value.filter((t) => t.sessionId === props.id)
+    : transfers.value
+);
+
+// 注入当前会话信息后入队，便于按 session 过滤。
+function startTransfer(opts: {
+  kind: "download" | "upload";
+  name: string;
+  withProgress?: boolean;
+  start: (transferId: string) => Promise<void>;
+}) {
+  return enqueue({ ...opts, sessionId: props.id, sessionLabel: props.sessionLabel ?? props.id });
+}
+function transferPercent(t: { transferred: number; total: number; status: string }): number {
+  if (t.status === "done") return 100;
+  if (!t.total) return 0;
+  return Math.min(100, Math.round((t.transferred / t.total) * 100));
+}
 
 // 右键 / 长按上下文菜单。entry 为空时是空白区菜单（上传 / 新建文件夹）。
 const lp = useLongPress();
@@ -91,7 +120,6 @@ const marquee = ref({ active: false, left: 0, top: 0, width: 0, height: 0 });
 let marqueeStart: { x: number; y: number } | null = null;
 
 function toggleSelect(entry: FileEntry) {
-  if (entry.isDir) return; // 目录不参与下载选择
   const next = new Set(selected.value);
   next.has(entry.path) ? next.delete(entry.path) : next.add(entry.path);
   selected.value = next;
@@ -136,7 +164,7 @@ function applyMarquee(left: number, top: number, right: number, bottom: number) 
     const r = el.getBoundingClientRect();
     const hit = !(r.right < left || r.left > right || r.bottom < top || r.top > bottom);
     const entry = entries.value[i];
-    if (hit && entry && !entry.isDir) next.add(entry.path);
+    if (hit && entry) next.add(entry.path);
   });
   selected.value = next;
 }
@@ -146,17 +174,21 @@ function joinLocal(dir: string, name: string): string {
   return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
 }
 async function downloadSelected() {
-  const files = entries.value.filter((e) => !e.isDir && selected.value.has(e.path));
-  if (!files.length) return;
+  const items = entries.value.filter((e) => selected.value.has(e.path));
+  if (!items.length) return;
   const dir = await open({ directory: true });
   if (!dir || typeof dir !== "string") return;
-  error.value = "";
-  for (const f of files) {
-    try {
-      await sftpDownload(props.id, f.path, joinLocal(dir, f.name));
-    } catch (e) {
-      error.value = String(e);
-    }
+  for (const it of items) {
+    const target = joinLocal(dir, it.name);
+    startTransfer({
+      kind: "download",
+      name: it.name,
+      withProgress: true,
+      start: (tid) =>
+        it.isDir
+          ? sftpDownloadDir(props.id, it.path, target, tid)
+          : sftpDownload(props.id, it.path, target, tid),
+    });
   }
   clearSelection();
 }
@@ -235,23 +267,41 @@ async function loadHome() {
 async function download(entry: FileEntry) {
   const target = await save({ defaultPath: entry.name });
   if (!target) return;
-  try {
-    await sftpDownload(props.id, entry.path, target);
-  } catch (e) {
-    error.value = String(e);
-  }
+  startTransfer({
+    kind: "download",
+    name: entry.name,
+    withProgress: true,
+    start: (tid) => sftpDownload(props.id, entry.path, target, tid),
+  });
+}
+
+// 下载目录：选目标父文件夹，在其下重建该目录。
+async function downloadDir(entry: FileEntry) {
+  const dir = await open({ directory: true });
+  if (!dir || typeof dir !== "string") return;
+  const target = joinLocal(dir, entry.name);
+  startTransfer({
+    kind: "download",
+    name: entry.name,
+    withProgress: true,
+    start: (tid) => sftpDownloadDir(props.id, entry.path, target, tid),
+  });
 }
 
 async function uploadFrom(localPaths: string[]) {
-  error.value = "";
   for (const local of localPaths) {
-    try {
-      await sftpUpload(props.id, local, joinRemote(cwd.value, basename(local)));
-    } catch (e) {
-      error.value = String(e);
-    }
+    const name = basename(local);
+    const remote = joinRemote(cwd.value, name); // 入队时固定目标，避免随后切目录跑偏
+    startTransfer({
+      kind: "upload",
+      name,
+      withProgress: true,
+      start: async (tid) => {
+        await sftpUpload(props.id, local, remote, tid);
+        refresh();
+      },
+    });
   }
-  refresh();
 }
 
 async function pickUpload() {
@@ -358,6 +408,14 @@ watch(
       <button class="tb" type="button" title="刷新" @click="refresh">⟳</button>
       <button class="tb" type="button" title="新建文件夹" @click="openMkdir">＋📁</button>
       <button class="tb" type="button" title="上传文件" @click="pickUpload">⬆ 上传</button>
+      <button
+        class="tb transfers-btn"
+        type="button"
+        title="传输列表"
+        @click="showTransfers = !showTransfers"
+      >
+        ⇅ 传输<span v-if="activeCount" class="badge">{{ activeCount }}</span>
+      </button>
     </div>
 
     <nav class="crumbs">
@@ -427,6 +485,53 @@ watch(
         height: marquee.height + 'px',
       }"
     ></div>
+
+    <div v-if="showTransfers" class="transfers">
+      <div class="transfers-head">
+        <span>传输列表</span>
+        <label class="scope">
+          <input v-model="onlyCurrentSession" type="checkbox" />
+          仅当前会话
+        </label>
+        <button type="button" @click="clearFinished">清除已完成</button>
+        <button type="button" @click="showTransfers = false">×</button>
+      </div>
+      <div class="transfers-body">
+        <div v-if="!visibleTransfers.length" class="hint">暂无传输</div>
+        <div v-for="t in visibleTransfers" :key="t.id" class="tr" :class="t.status">
+          <div class="tr-top">
+            <span class="tr-name" :title="t.name">
+              {{ t.kind === "upload" ? "⬆" : "⬇" }} {{ t.name }}
+              <em v-if="!onlyCurrentSession" class="tr-session">· {{ t.sessionLabel }}</em>
+            </span>
+            <span class="tr-meta">
+              <template v-if="t.status === 'error'">失败</template>
+              <template v-else-if="t.status === 'cancelled'">已取消</template>
+              <template v-else-if="t.status === 'done'">完成</template>
+              <template v-else-if="t.status === 'queued'">排队中</template>
+              <template v-else>{{ transferPercent(t) }}%</template>
+            </span>
+            <button
+              v-if="t.status === 'queued' || t.status === 'running'"
+              class="tr-cancel"
+              type="button"
+              title="取消"
+              @click="cancelTransfer(t.id)"
+            >
+              ×
+            </button>
+          </div>
+          <div class="tr-bar">
+            <div
+              class="tr-fill"
+              :class="{ indeterminate: t.status === 'running' && t.kind === 'upload' }"
+              :style="{ width: transferPercent(t) + '%' }"
+            ></div>
+          </div>
+          <div v-if="t.error" class="tr-err" :title="t.error">{{ t.error }}</div>
+        </div>
+      </div>
+    </div>
 
     <ContextMenu
       :open="menu.open"
@@ -621,6 +726,147 @@ watch(
 .hint {
   padding: var(--sp-3);
   color: var(--muted);
+}
+.transfers-btn {
+  position: relative;
+  margin-left: auto;
+}
+.badge {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--fs-xs);
+}
+.transfers {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  max-height: 60%;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
+}
+.transfers-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-sm);
+}
+.transfers-head > span {
+  flex: 1;
+  font-weight: 600;
+}
+.scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-weight: 400;
+  cursor: pointer;
+}
+.tr-session {
+  font-style: normal;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+.transfers-head button {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.transfers-body {
+  overflow: auto;
+  padding: var(--sp-2);
+}
+.tr {
+  padding: var(--sp-2) 0;
+}
+.tr + .tr {
+  border-top: 1px solid var(--line);
+}
+.tr-top {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+.tr-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tr-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+.tr-bar {
+  margin-top: 4px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.tr-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s;
+}
+.tr.done .tr-fill {
+  background: var(--ok);
+}
+.tr.error .tr-fill {
+  background: var(--danger);
+  width: 100% !important;
+}
+.tr.cancelled .tr-fill {
+  background: var(--muted);
+}
+.tr-cancel {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tr-cancel:hover {
+  background: var(--surface-3);
+  color: var(--danger);
+}
+.tr-fill.indeterminate {
+  width: 40% !important;
+  animation: tr-indet 1.1s ease-in-out infinite;
+}
+@keyframes tr-indet {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+.tr-err {
+  margin-top: 2px;
+  color: var(--danger);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .error {
   padding: var(--sp-2);

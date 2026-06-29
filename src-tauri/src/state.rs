@@ -5,6 +5,7 @@ use std::sync::Arc;
 use russh::client;
 use russh_sftp::client::SftpSession;
 use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 use crate::ssh::{ClientHandler, ShellCmd};
 
@@ -22,4 +23,6 @@ pub struct SessionEntry {
 #[derive(Default)]
 pub struct AppState {
     pub sessions: Mutex<HashMap<String, Arc<SessionEntry>>>,
+    /// 进行中的传输：transferId -> 取消令牌，供 sftp_cancel 中止。
+    pub transfers: Mutex<HashMap<String, CancellationToken>>,
 }

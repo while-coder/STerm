@@ -8,6 +8,9 @@ const { settings } = useSettings();
 function clampFontSize() {
   settings.termFontSize = Math.min(28, Math.max(8, Math.round(settings.termFontSize) || 14));
 }
+function clampParallel() {
+  settings.maxParallelTransfers = Math.min(8, Math.max(1, Math.round(settings.maxParallelTransfers) || 1));
+}
 </script>
 
 <template>
@@ -91,6 +94,23 @@ function clampFontSize() {
           <small>关闭后需要在 SFTP 面板里手动刷新。</small>
         </span>
         <input v-model="settings.sftpAutoHome" type="checkbox" :disabled="!settings.showSftp" />
+      </label>
+      <label class="setting-row">
+        <span>
+          <strong>并行传输上限</strong>
+          <small>同时进行的上传 / 下载数，其余排队。</small>
+        </span>
+        <span class="stepper">
+          <button type="button" @click="settings.maxParallelTransfers--; clampParallel()">−</button>
+          <input
+            v-model.number="settings.maxParallelTransfers"
+            type="number"
+            min="1"
+            max="8"
+            @change="clampParallel"
+          />
+          <button type="button" @click="settings.maxParallelTransfers++; clampParallel()">＋</button>
+        </span>
       </label>
     </section>
   </div>

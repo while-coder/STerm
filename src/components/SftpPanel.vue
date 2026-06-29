@@ -24,6 +24,7 @@ const { tabs, sftpTabId, selectSftpTab, onTabSftpCwdChanged, onTabSftpHomeChange
       <FileBrowser
         :key="activeSftpTab.id"
         :id="activeSftpTab.id"
+        :session-label="activeSftpTab.title"
         :connected="activeSftpTab.connected"
         :auto-home="settings.sftpAutoHome"
         :follow-path="activeSftpTab.sftpFollowPath"

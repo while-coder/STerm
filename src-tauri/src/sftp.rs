@@ -6,9 +6,79 @@ use std::sync::Arc;
 use anyhow::Result;
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
+use tokio_util::sync::CancellationToken;
 
 use crate::state::{AppState, SessionEntry};
+
+/// 注册传输取消令牌，返回克隆供拷贝循环检查。
+async fn register_transfer(state: &State<'_, AppState>, transfer_id: &str) -> CancellationToken {
+    let token = CancellationToken::new();
+    state
+        .transfers
+        .lock()
+        .await
+        .insert(transfer_id.to_string(), token.clone());
+    token
+}
+
+async fn unregister_transfer(state: &State<'_, AppState>, transfer_id: &str) {
+    state.transfers.lock().await.remove(transfer_id);
+}
+
+/// 下载进度事件载荷（事件名 `sftp-progress-<transferId>`）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Progress {
+    transferred: u64,
+    total: u64,
+    done: bool,
+}
+
+/// 分块拷贝并按阈值上报进度。`done` 为累计已传字节（跨多文件累加用）。
+/// 返回 Ok(true) 表示完成，Ok(false) 表示被取消令牌中断。
+async fn copy_emit<R, W>(
+    src: &mut R,
+    dst: &mut W,
+    total: u64,
+    done: &mut u64,
+    app: &AppHandle,
+    event: &str,
+    token: &CancellationToken,
+) -> Result<bool>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut last = *done;
+    loop {
+        if token.is_cancelled() {
+            return Ok(false);
+        }
+        let n = src.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        dst.write_all(&buf[..n]).await?;
+        *done += n as u64;
+        // 每累计约 512KB 上报一次，避免事件风暴。
+        if *done - last >= 512 * 1024 {
+            last = *done;
+            let _ = app.emit(
+                event,
+                Progress {
+                    transferred: *done,
+                    total,
+                    done: false,
+                },
+            );
+        }
+    }
+    dst.flush().await?;
+    Ok(true)
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,83 +158,193 @@ async fn list_inner(entry: &SessionEntry, path: &str) -> Result<Vec<FileEntry>> 
     Ok(out)
 }
 
+/// 取消进行中的传输（按 transferId）。
+#[tauri::command]
+pub async fn sftp_cancel(state: State<'_, AppState>, transfer_id: String) -> Result<(), String> {
+    if let Some(token) = state.transfers.lock().await.get(&transfer_id) {
+        token.cancel();
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn sftp_download(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     remote_path: String,
     local_path: String,
+    transfer_id: String,
 ) -> Result<(), String> {
     let entry = fetch_entry(&state, &id).await?;
-    download_inner(&entry, &remote_path, &local_path)
-        .await
-        .map_err(|e| e.to_string())
+    let token = register_transfer(&state, &transfer_id).await;
+    let res = download_inner(&app, &entry, &remote_path, &local_path, &transfer_id, &token).await;
+    unregister_transfer(&state, &transfer_id).await;
+    match res {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("已取消".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
-async fn download_inner(entry: &SessionEntry, remote: &str, local: &str) -> Result<()> {
+async fn download_inner(
+    app: &AppHandle,
+    entry: &SessionEntry,
+    remote: &str,
+    local: &str,
+    transfer_id: &str,
+    token: &CancellationToken,
+) -> Result<bool> {
     let sftp = get_sftp(entry).await?;
+    let event = format!("sftp-progress-{transfer_id}");
+    let total = sftp.metadata(remote).await.ok().and_then(|m| m.size).unwrap_or(0);
     let mut src = sftp.open(remote).await?;
     let mut dst = tokio::fs::File::create(local).await?;
-    tokio::io::copy(&mut src, &mut dst).await?;
-    Ok(())
+    let mut done = 0u64;
+    let completed = copy_emit(&mut src, &mut dst, total, &mut done, app, &event, token).await?;
+    if !completed {
+        drop(dst);
+        let _ = tokio::fs::remove_file(local).await; // 清理半成品
+        return Ok(false);
+    }
+    let _ = app.emit(
+        &event,
+        Progress {
+            transferred: done,
+            total,
+            done: true,
+        },
+    );
+    Ok(true)
 }
 
 #[tauri::command]
 pub async fn sftp_upload(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     local_path: String,
     remote_path: String,
+    transfer_id: String,
 ) -> Result<(), String> {
     let entry = fetch_entry(&state, &id).await?;
-    upload_inner(&entry, &local_path, &remote_path)
-        .await
-        .map_err(|e| e.to_string())
+    let token = register_transfer(&state, &transfer_id).await;
+    let res = upload_inner(&app, &entry, &local_path, &remote_path, &transfer_id, &token).await;
+    unregister_transfer(&state, &transfer_id).await;
+    match res {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("已取消".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
-async fn upload_inner(entry: &SessionEntry, local: &str, remote: &str) -> Result<()> {
+async fn upload_inner(
+    app: &AppHandle,
+    entry: &SessionEntry,
+    local: &str,
+    remote: &str,
+    transfer_id: &str,
+    token: &CancellationToken,
+) -> Result<bool> {
     use tokio::io::AsyncWriteExt;
     let sftp = get_sftp(entry).await?;
+    let event = format!("sftp-progress-{transfer_id}");
+    let total = tokio::fs::metadata(local).await.map(|m| m.len()).unwrap_or(0);
     let mut src = tokio::fs::File::open(local).await?;
     let mut dst = sftp.create(remote).await?;
-    tokio::io::copy(&mut src, &mut dst).await?;
+    let mut done = 0u64;
+    let completed = copy_emit(&mut src, &mut dst, total, &mut done, app, &event, token).await?;
+    if !completed {
+        let _ = dst.shutdown().await;
+        let _ = sftp.remove_file(remote).await; // 清理半成品
+        return Ok(false);
+    }
     dst.shutdown().await?; // 确保刷新并关闭远端文件
-    Ok(())
+    let _ = app.emit(
+        &event,
+        Progress {
+            transferred: done,
+            total,
+            done: true,
+        },
+    );
+    Ok(true)
 }
 
 #[tauri::command]
 pub async fn sftp_download_dir(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     remote_path: String,
     local_path: String,
+    transfer_id: String,
 ) -> Result<(), String> {
     let entry = fetch_entry(&state, &id).await?;
-    download_dir_inner(&entry, &remote_path, &local_path)
-        .await
-        .map_err(|e| e.to_string())
+    let token = register_transfer(&state, &transfer_id).await;
+    let res = download_dir_inner(&app, &entry, &remote_path, &local_path, &transfer_id, &token).await;
+    unregister_transfer(&state, &transfer_id).await;
+    match res {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("已取消".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
-/// 递归下载远端目录到本地（迭代式，避免 async 递归装箱），在本地重建目录结构。
-async fn download_dir_inner(entry: &SessionEntry, remote_root: &str, local_root: &str) -> Result<()> {
+/// 递归下载远端目录（迭代式，避免 async 递归装箱）：先遍历求总字节数并建好本地目录，
+/// 再逐文件分块拷贝、按总量累计上报进度。
+async fn download_dir_inner(
+    app: &AppHandle,
+    entry: &SessionEntry,
+    remote_root: &str,
+    local_root: &str,
+    transfer_id: &str,
+    token: &CancellationToken,
+) -> Result<bool> {
     let sftp = get_sftp(entry).await?;
+    let event = format!("sftp-progress-{transfer_id}");
+
+    // 1) 遍历：建本地目录、收集文件清单与总字节。
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    let mut total = 0u64;
     let mut stack: Vec<(String, PathBuf)> = vec![(remote_root.to_string(), PathBuf::from(local_root))];
     while let Some((remote, local)) = stack.pop() {
         tokio::fs::create_dir_all(&local).await?;
         for item in sftp.read_dir(&remote).await? {
             let name = item.file_name();
+            let meta = item.metadata();
             let remote_child = join_path(&remote, &name);
             let local_child = local.join(&name);
-            if item.metadata().is_dir() {
+            if meta.is_dir() {
                 stack.push((remote_child, local_child));
             } else {
-                let mut src = sftp.open(&remote_child).await?;
-                let mut dst = tokio::fs::File::create(&local_child).await?;
-                tokio::io::copy(&mut src, &mut dst).await?;
+                total += meta.size.unwrap_or(0);
+                files.push((remote_child, local_child));
             }
         }
     }
-    Ok(())
+
+    // 2) 逐文件拷贝，done 跨文件累加。
+    let mut done = 0u64;
+    for (remote_child, local_child) in files {
+        let mut src = sftp.open(&remote_child).await?;
+        let mut dst = tokio::fs::File::create(&local_child).await?;
+        let completed = copy_emit(&mut src, &mut dst, total, &mut done, app, &event, token).await?;
+        if !completed {
+            drop(dst);
+            let _ = tokio::fs::remove_file(&local_child).await; // 清理半成品（已完成文件保留）
+            return Ok(false);
+        }
+    }
+    let _ = app.emit(
+        &event,
+        Progress {
+            transferred: done,
+            total,
+            done: true,
+        },
+    );
+    Ok(true)
 }
 
 #[tauri::command]
