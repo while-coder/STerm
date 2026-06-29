@@ -10,8 +10,16 @@ export interface AppSettings {
   sftpAutoHome: boolean;
   /** 侧边栏折叠（仅桌面布局生效）。 */
   sidebarCollapsed: boolean;
+  /** 侧边栏宽度（桌面，px）。 */
+  sidebarWidth: number;
   /** SFTP 面板宽度（桌面，px）。 */
   sftpPanelWidth: number;
+  /** 终端配色方案 key（见 terminalThemes，"auto" 跟随界面主题）。 */
+  termColorScheme: string;
+  /** 终端字号（px）。 */
+  termFontSize: number;
+  /** 终端字体（CSS font-family）。 */
+  termFontFamily: string;
 }
 
 const CONNECTIONS_KEY = "sterm.connections";
@@ -22,7 +30,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   sftpFollowSsh: true,
   sftpAutoHome: true,
   sidebarCollapsed: false,
+  sidebarWidth: 264,
   sftpPanelWidth: 340,
+  termColorScheme: "auto",
+  termFontSize: 14,
+  termFontFamily: "Consolas, 'Courier New', monospace",
 };
 
 export function loadConnections(): SavedConnection[] {

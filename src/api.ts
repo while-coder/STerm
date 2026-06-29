@@ -53,6 +53,8 @@ export const sftpList = (id: string, path: string) =>
   invoke<FileEntry[]>("sftp_list", { id, path });
 export const sftpDownload = (id: string, remotePath: string, localPath: string) =>
   invoke<void>("sftp_download", { id, remotePath, localPath });
+export const sftpDownloadDir = (id: string, remotePath: string, localPath: string) =>
+  invoke<void>("sftp_download_dir", { id, remotePath, localPath });
 export const sftpUpload = (id: string, localPath: string, remotePath: string) =>
   invoke<void>("sftp_upload", { id, localPath, remotePath });
 export const sftpMkdir = (id: string, path: string) =>

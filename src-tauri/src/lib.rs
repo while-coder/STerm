@@ -19,6 +19,7 @@ pub fn run() {
             sftp::sftp_home,
             sftp::sftp_list,
             sftp::sftp_download,
+            sftp::sftp_download_dir,
             sftp::sftp_upload,
             sftp::sftp_mkdir,
             sftp::sftp_rename,

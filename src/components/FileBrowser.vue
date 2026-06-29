@@ -8,6 +8,7 @@ import {
   sftpHome,
   sftpList,
   sftpDownload,
+  sftpDownloadDir,
   sftpUpload,
   sftpMkdir,
   sftpRename,
@@ -36,8 +37,9 @@ const error = ref("");
 const homeLoaded = ref(false);
 const dragOver = ref(false);
 
-// 右键 / 长按上下文菜单。
+// 右键 / 长按上下文菜单。entry 为空时是空白区菜单（上传 / 新建文件夹）。
 const lp = useLongPress();
+const lpBlank = useLongPress();
 const menu = ref<{ open: boolean; x: number; y: number; entry: FileEntry | null }>({
   open: false,
   x: 0,
@@ -46,9 +48,14 @@ const menu = ref<{ open: boolean; x: number; y: number; entry: FileEntry | null 
 });
 const menuItems = computed<MenuItem[]>(() => {
   const e = menu.value.entry;
-  if (!e) return [];
+  if (!e) {
+    return [
+      { key: "upload", label: "上传文件" },
+      { key: "mkdir", label: "新建文件夹" },
+    ];
+  }
   const items: MenuItem[] = [];
-  if (!e.isDir) items.push({ key: "download", label: "下载" });
+  items.push({ key: "download", label: e.isDir ? "下载文件夹" : "下载" });
   items.push({ key: "rename", label: "重命名" });
   items.push({ key: "delete", label: "删除", danger: true });
   return items;
@@ -56,16 +63,102 @@ const menuItems = computed<MenuItem[]>(() => {
 function openMenuAt(e: MouseEvent | PointerEvent, entry: FileEntry) {
   menu.value = { open: true, x: e.clientX, y: e.clientY, entry };
 }
+function openBlankMenu(e: MouseEvent | PointerEvent) {
+  menu.value = { open: true, x: e.clientX, y: e.clientY, entry: null };
+}
 function onMenuSelect(key: string) {
+  if (key === "upload") return void pickUpload();
+  if (key === "mkdir") return openMkdir();
   const entry = menu.value.entry;
   if (!entry) return;
-  if (key === "download") void download(entry);
+  if (key === "download") void (entry.isDir ? downloadDir(entry) : download(entry));
   else if (key === "rename") openRename(entry);
   else if (key === "delete") openDelete(entry);
 }
-function onNameClick(entry: FileEntry) {
+function onNameClick(entry: FileEntry, ev: MouseEvent) {
   if (lp.suppressed.value) return;
+  if (ev.ctrlKey || ev.metaKey) {
+    toggleSelect(entry);
+    return;
+  }
   enter(entry);
+}
+
+// —— 多选 / 框选下载 ——
+const listEl = ref<HTMLElement | null>(null);
+const selected = ref<Set<string>>(new Set());
+const marquee = ref({ active: false, left: 0, top: 0, width: 0, height: 0 });
+let marqueeStart: { x: number; y: number } | null = null;
+
+function toggleSelect(entry: FileEntry) {
+  if (entry.isDir) return; // 目录不参与下载选择
+  const next = new Set(selected.value);
+  next.has(entry.path) ? next.delete(entry.path) : next.add(entry.path);
+  selected.value = next;
+}
+function clearSelection() {
+  selected.value = new Set();
+}
+
+function onListPointerDown(e: PointerEvent) {
+  if (e.target !== e.currentTarget) return; // 仅空白区域
+  if (e.pointerType === "mouse") {
+    if (e.button !== 0) return;
+    marqueeStart = { x: e.clientX, y: e.clientY }; // 移动超过阈值才视为框选
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  } else {
+    lpBlank.start(e, openBlankMenu);
+  }
+}
+function onListPointerMove(e: PointerEvent) {
+  lpBlank.move(e);
+  if (!marqueeStart) return;
+  if (!marquee.value.active && Math.hypot(e.clientX - marqueeStart.x, e.clientY - marqueeStart.y) < 5)
+    return;
+  const left = Math.min(marqueeStart.x, e.clientX);
+  const top = Math.min(marqueeStart.y, e.clientY);
+  const right = Math.max(marqueeStart.x, e.clientX);
+  const bottom = Math.max(marqueeStart.y, e.clientY);
+  marquee.value = { active: true, left, top, width: right - left, height: bottom - top };
+  applyMarquee(left, top, right, bottom);
+}
+function onListPointerUp() {
+  lpBlank.end();
+  if (marqueeStart && !marquee.value.active) clearSelection(); // 空白单击 = 清除
+  marqueeStart = null;
+  marquee.value.active = false;
+}
+function applyMarquee(left: number, top: number, right: number, bottom: number) {
+  const rows = listEl.value?.querySelectorAll<HTMLElement>(".row");
+  if (!rows) return;
+  const next = new Set<string>();
+  rows.forEach((el, i) => {
+    const r = el.getBoundingClientRect();
+    const hit = !(r.right < left || r.left > right || r.bottom < top || r.top > bottom);
+    const entry = entries.value[i];
+    if (hit && entry && !entry.isDir) next.add(entry.path);
+  });
+  selected.value = next;
+}
+
+function joinLocal(dir: string, name: string): string {
+  const sep = dir.includes("\\") ? "\\" : "/";
+  return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
+}
+async function downloadSelected() {
+  const files = entries.value.filter((e) => !e.isDir && selected.value.has(e.path));
+  if (!files.length) return;
+  const dir = await open({ directory: true });
+  if (!dir || typeof dir !== "string") return;
+  error.value = "";
+  for (const f of files) {
+    try {
+      await sftpDownload(props.id, f.path, joinLocal(dir, f.name));
+    } catch (e) {
+      error.value = String(e);
+    }
+  }
+  clearSelection();
 }
 
 // 输入对话框（新建文件夹 / 重命名 / 删除确认）。
@@ -90,6 +183,7 @@ async function listPath(path: string): Promise<boolean> {
     const next = await sftpList(props.id, path);
     cwd.value = path;
     entries.value = next;
+    selected.value = new Set(); // 切换目录后清空选择
     emit("cwdChanged", cwd.value);
     return true;
   } catch (e) {
@@ -280,18 +374,32 @@ watch(
 
     <div v-if="error" class="error">{{ error }}</div>
 
-    <div class="list">
+    <div v-if="selected.size" class="selbar">
+      <span>已选 {{ selected.size }} 项</span>
+      <button type="button" class="primary" @click="downloadSelected">下载</button>
+      <button type="button" @click="clearSelection">清除</button>
+    </div>
+
+    <div
+      ref="listEl"
+      class="list"
+      @contextmenu.prevent="openBlankMenu"
+      @pointerdown="onListPointerDown"
+      @pointermove="onListPointerMove"
+      @pointerup="onListPointerUp"
+      @pointercancel="onListPointerUp"
+    >
       <div
         v-for="e in entries"
         :key="e.path"
         class="row"
-        :class="{ dir: e.isDir }"
-        @contextmenu.prevent="openMenuAt($event, e)"
+        :class="{ dir: e.isDir, selected: selected.has(e.path) }"
+        @contextmenu.prevent.stop="openMenuAt($event, e)"
       >
         <button
           class="name"
           type="button"
-          @click="onNameClick(e)"
+          @click="onNameClick(e, $event)"
           @pointerdown="lp.start($event, (ev) => openMenuAt(ev, e))"
           @pointermove="lp.move"
           @pointerup="lp.end"
@@ -308,6 +416,17 @@ watch(
     </div>
 
     <div v-if="dragOver" class="drop-mask">松开以上传到 {{ cwd }}</div>
+
+    <div
+      v-if="marquee.active"
+      class="marquee"
+      :style="{
+        left: marquee.left + 'px',
+        top: marquee.top + 'px',
+        width: marquee.width + 'px',
+        height: marquee.height + 'px',
+      }"
+    ></div>
 
     <ContextMenu
       :open="menu.open"
@@ -405,6 +524,7 @@ watch(
   flex: 1;
   min-height: 0;
   overflow: auto;
+  user-select: none;
 }
 .row {
   display: flex;
@@ -415,6 +535,43 @@ watch(
 }
 .row:hover {
   background: var(--surface-2);
+}
+.row.selected {
+  background: var(--accent-soft);
+}
+.selbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: var(--fs-xs);
+}
+.selbar span {
+  flex: 1;
+  color: var(--muted);
+}
+.selbar button {
+  min-height: 28px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+  cursor: pointer;
+}
+.selbar button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.marquee {
+  position: fixed;
+  z-index: 60;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  pointer-events: none;
 }
 .name {
   display: flex;

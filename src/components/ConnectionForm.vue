@@ -175,6 +175,15 @@ function onConnect() {
   gap: var(--sp-5);
   padding: var(--sp-1) 0;
 }
+.auth-tabs label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+}
+.auth-tabs input {
+  margin: 0;
+}
 .fav-toggle {
   display: flex;
   align-items: center;
@@ -220,7 +229,7 @@ function onConnect() {
   color: var(--warn);
   font-size: var(--fs-sm);
 }
-input {
+input:not([type="radio"]):not([type="checkbox"]) {
   min-height: var(--hit);
   padding: 0 var(--sp-3);
   border-radius: var(--radius);

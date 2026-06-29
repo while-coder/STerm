@@ -110,6 +110,22 @@ function onTabError(tab: SessionTab, msg: string) {
   }
 }
 
+// —— 侧栏宽度拖拽（桌面）——
+function startResizeSidebar(e: PointerEvent) {
+  const startX = e.clientX;
+  const startW = settings.sidebarWidth;
+  const move = (ev: PointerEvent) => {
+    const w = startW + (ev.clientX - startX);
+    settings.sidebarWidth = Math.min(480, Math.max(180, w));
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
 // —— SFTP 面板宽度拖拽（桌面）——
 function startResize(e: PointerEvent) {
   const startX = e.clientX;
@@ -128,8 +144,12 @@ function startResize(e: PointerEvent) {
 </script>
 
 <template>
-  <div class="layout" :class="{ mobile: isMobile, 'has-sidebar': showSidebar }">
-    <!-- 侧栏：桌面常驻（可折叠）；移动端为抽屉。 -->
+  <div
+    class="layout"
+    :class="{ mobile: isMobile, 'has-sidebar': showSidebar }"
+    :style="showSidebar ? { gridTemplateColumns: `${settings.sidebarWidth}px 6px 1fr` } : undefined"
+  >
+    <!-- 侧栏：桌面常驻（可折叠，分割线可拖拽调宽）；移动端为抽屉。 -->
     <div v-if="showSidebar" class="sidebar-col">
       <ConnectionSidebar
         @connect="handleConnect"
@@ -138,6 +158,12 @@ function startResize(e: PointerEvent) {
         @settings="settingsOpen = true"
       />
     </div>
+    <div
+      v-if="showSidebar"
+      class="sidebar-resizer"
+      title="拖拽调整侧栏宽度"
+      @pointerdown.prevent="startResizeSidebar"
+    ></div>
 
     <!-- 移动端抽屉 -->
     <div v-if="isMobile && drawerOpen" class="drawer-backdrop" @click.self="drawerOpen = false">
@@ -316,6 +342,14 @@ function startResize(e: PointerEvent) {
   background: var(--line);
 }
 .resizer:hover {
+  background: var(--accent);
+}
+.sidebar-resizer {
+  min-height: 0;
+  cursor: col-resize;
+  background: var(--line);
+}
+.sidebar-resizer:hover {
   background: var(--accent);
 }
 .sftp-col {

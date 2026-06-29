@@ -1,8 +1,13 @@
 <script setup lang="ts">
-// 设置面板：主题 + SFTP 行为。直接读写 useSettings 单例。
+// 设置面板：主题、终端外观、SFTP 行为。直接读写 useSettings 单例。
 import { useSettings } from "../composables/useSettings";
+import { TERMINAL_FONTS, TERMINAL_SCHEMES } from "../terminalThemes";
 
 const { settings } = useSettings();
+
+function clampFontSize() {
+  settings.termFontSize = Math.min(28, Math.max(8, Math.round(settings.termFontSize) || 14));
+}
 </script>
 
 <template>
@@ -23,6 +28,45 @@ const { settings } = useSettings();
           浅色
         </label>
       </div>
+    </section>
+
+    <section class="section">
+      <div class="section-title">终端</div>
+      <label class="setting-row">
+        <span>
+          <strong>配色方案</strong>
+          <small>终端前景 / 背景配色。</small>
+        </span>
+        <select v-model="settings.termColorScheme" class="field">
+          <option v-for="s in TERMINAL_SCHEMES" :key="s.key" :value="s.key">{{ s.label }}</option>
+        </select>
+      </label>
+      <label class="setting-row">
+        <span>
+          <strong>字体</strong>
+          <small>等宽字体，需本机已安装。</small>
+        </span>
+        <select v-model="settings.termFontFamily" class="field">
+          <option v-for="f in TERMINAL_FONTS" :key="f.key" :value="f.key">{{ f.label }}</option>
+        </select>
+      </label>
+      <label class="setting-row">
+        <span>
+          <strong>字体大小</strong>
+          <small>8 – 28 px。</small>
+        </span>
+        <span class="stepper">
+          <button type="button" @click="settings.termFontSize--; clampFontSize()">−</button>
+          <input
+            v-model.number="settings.termFontSize"
+            type="number"
+            min="8"
+            max="28"
+            @change="clampFontSize"
+          />
+          <button type="button" @click="settings.termFontSize++; clampFontSize()">＋</button>
+        </span>
+      </label>
     </section>
 
     <section class="section">
@@ -119,5 +163,41 @@ const { settings } = useSettings();
 }
 .setting-row.disabled {
   opacity: 0.55;
+}
+.field {
+  flex: 0 0 auto;
+  min-width: 160px;
+  min-height: 34px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.stepper {
+  flex-direction: row !important;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.stepper button {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+  cursor: pointer;
+}
+.stepper button:hover {
+  border-color: var(--accent);
+}
+.stepper input {
+  width: 52px;
+  min-height: 32px;
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
 }
 </style>

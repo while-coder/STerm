@@ -8,6 +8,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import { sshConnect, sshWrite, sshResize, sshDisconnect, type ConnectOpts } from "../api";
 import { useResponsive } from "../composables/useResponsive";
+import { useSettings } from "../composables/useSettings";
+import { resolveTerminalTheme, schemeBackground } from "../terminalThemes";
 
 type TerminalThemeMode = "dark" | "light";
 
@@ -24,6 +26,7 @@ const emit = defineEmits<{
 }>();
 
 const { isMobile } = useResponsive();
+const { settings } = useSettings();
 const host = ref<HTMLDivElement | null>(null);
 let term: Terminal | null = null;
 let fit: FitAddon | null = null;
@@ -33,11 +36,12 @@ let disposeOsc7: (() => void) | null = null;
 // OSC 7 上报去重：仅当真实 cwd 变化时才通知上层，避免每个提示符都触发跟随。
 let lastCwd = "";
 
-function terminalTheme(mode: TerminalThemeMode = "dark") {
-  return mode === "light"
-    ? { background: "#ffffff", foreground: "#1f2328", cursor: "#0b5cad" }
-    : { background: "#1e1e1e", foreground: "#d4d4d4", cursor: "#d4d4d4" };
+/** 当前配色方案对应的 xterm 主题（auto 跟随界面深 / 浅）。 */
+function terminalTheme() {
+  return resolveTerminalTheme(settings.termColorScheme, props.theme ?? "dark");
 }
+/** 终端容器 padding 区域底色，与配色背景一致。 */
+const padBg = ref(schemeBackground(settings.termColorScheme, props.theme ?? "dark"));
 
 /** base64 -> 字节数组，保证二进制流（含多字节 UTF-8）完整还原。 */
 function b64ToBytes(b64: string): Uint8Array {
@@ -88,10 +92,10 @@ function sendKey(key: string) {
 onMounted(async () => {
   const id = props.opts.id;
   term = new Terminal({
-    fontFamily: "Consolas, 'Courier New', monospace",
-    fontSize: 14,
+    fontFamily: settings.termFontFamily,
+    fontSize: settings.termFontSize,
     cursorBlink: true,
-    theme: terminalTheme(props.theme),
+    theme: terminalTheme(),
   });
   fit = new FitAddon();
   term.loadAddon(fit);
@@ -155,10 +159,23 @@ watch(
   }
 );
 
+// 配色（含界面主题变化 / auto）实时生效。
 watch(
-  () => props.theme,
-  (theme) => {
-    if (term) term.options.theme = terminalTheme(theme);
+  [() => props.theme, () => settings.termColorScheme],
+  () => {
+    padBg.value = schemeBackground(settings.termColorScheme, props.theme ?? "dark");
+    if (term) term.options.theme = terminalTheme();
+  }
+);
+
+// 字号 / 字体变化：更新后重新 fit 以重算行列并通知后端 resize。
+watch(
+  [() => settings.termFontSize, () => settings.termFontFamily],
+  () => {
+    if (!term) return;
+    term.options.fontSize = settings.termFontSize;
+    term.options.fontFamily = settings.termFontFamily;
+    nextTick(() => fit?.fit());
   }
 );
 
@@ -173,7 +190,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="term-wrap">
-    <div ref="host" class="terminal"></div>
+    <div ref="host" class="terminal" :style="{ background: padBg }"></div>
     <div v-if="isMobile" class="keybar">
       <button type="button" @click="sendKey('esc')">Esc</button>
       <button type="button" @click="sendKey('tab')">Tab</button>

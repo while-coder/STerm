@@ -1,5 +1,6 @@
 // SFTP 文件操作：复用已建立的 SSH 连接，按需打开 sftp 子系统通道。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -128,6 +129,41 @@ async fn upload_inner(entry: &SessionEntry, local: &str, remote: &str) -> Result
     let mut dst = sftp.create(remote).await?;
     tokio::io::copy(&mut src, &mut dst).await?;
     dst.shutdown().await?; // 确保刷新并关闭远端文件
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_download_dir(
+    state: State<'_, AppState>,
+    id: String,
+    remote_path: String,
+    local_path: String,
+) -> Result<(), String> {
+    let entry = fetch_entry(&state, &id).await?;
+    download_dir_inner(&entry, &remote_path, &local_path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 递归下载远端目录到本地（迭代式，避免 async 递归装箱），在本地重建目录结构。
+async fn download_dir_inner(entry: &SessionEntry, remote_root: &str, local_root: &str) -> Result<()> {
+    let sftp = get_sftp(entry).await?;
+    let mut stack: Vec<(String, PathBuf)> = vec![(remote_root.to_string(), PathBuf::from(local_root))];
+    while let Some((remote, local)) = stack.pop() {
+        tokio::fs::create_dir_all(&local).await?;
+        for item in sftp.read_dir(&remote).await? {
+            let name = item.file_name();
+            let remote_child = join_path(&remote, &name);
+            let local_child = local.join(&name);
+            if item.metadata().is_dir() {
+                stack.push((remote_child, local_child));
+            } else {
+                let mut src = sftp.open(&remote_child).await?;
+                let mut dst = tokio::fs::File::create(&local_child).await?;
+                tokio::io::copy(&mut src, &mut dst).await?;
+            }
+        }
+    }
     Ok(())
 }
 
