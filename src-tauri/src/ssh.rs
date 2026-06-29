@@ -32,11 +32,13 @@ pub enum ShellCmd {
 /// 转义序列汇报真实工作目录（`ESC ] 7 ; file://host/path BEL`），供前端捕获以驱动
 /// SFTP 跟随。`printf` 中的 `\033` / `\a` 由远端 shell 解释为 ESC / BEL（故用裸反斜杠，
 /// 这里用 raw string 保留）。行首空格尽量避免该命令进入 shell 历史。幂等：已注入则不重复追加。
+/// 末尾的 clear 把这段注入命令的回显（及登录 banner）一次性擦掉，避免污染首屏。
 const OSC7_SETUP: &str = concat!(
     r#" __sterm7(){ printf '\033]7;file://%s%s\a' "${HOSTNAME:-localhost}" "$PWD"; }; "#,
     r#"if [ -n "$ZSH_VERSION" ]; then typeset -ga precmd_functions; precmd_functions+=(__sterm7); "#,
     r#"elif [ -n "$BASH_VERSION" ]; then case "$PROMPT_COMMAND" in *__sterm7*) ;; *) "#,
     r#"PROMPT_COMMAND="__sterm7${PROMPT_COMMAND:+;$PROMPT_COMMAND}";; esac; fi"#,
+    r#"; clear 2>/dev/null || printf '\033[3J\033[2J\033[H'"#,
     "\n",
 );
 

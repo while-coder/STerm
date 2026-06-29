@@ -43,9 +43,10 @@
     <circle cx="420" cy="232" r="26" fill="#28c840"/>
   </g>
 
-  <!-- 命令提示符 >_ -->
-  <g filter="url(#glow)" fill="none" stroke="url(#accent)" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
-    <polyline points="318,444 506,588 318,732"/>
-    <line x1="556" y1="732" x2="744" y2="732"/>
-  </g>
+  <!-- 命令提示符 > -->
+  <polyline filter="url(#glow)" fill="none" stroke="url(#accent)" stroke-width="76"
+            stroke-linecap="round" stroke-linejoin="round"
+            points="318,444 506,588 318,732"/>
+  <!-- 光标 _ -->
+  <rect filter="url(#glow)" x="556" y="694" width="188" height="64" rx="32" fill="url(#accent)"/>
 </svg>
