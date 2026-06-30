@@ -37,9 +37,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
   inset: 0;
   z-index: 50;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
-  padding: calc(var(--safe-top) + var(--sp-6)) var(--sp-4) var(--sp-4);
+  padding: calc(var(--safe-top) + var(--sp-4)) var(--sp-4) calc(var(--safe-bottom) + var(--sp-4));
   background: var(--overlay);
 }
 .sheet-backdrop.mobile {
@@ -49,6 +49,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
 .sheet {
   width: min(520px, 100%);
   max-height: calc(100vh - var(--sp-6) * 2);
+  min-width: 0;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--line);
@@ -102,6 +103,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
 }
 .sheet-body {
   padding: var(--sp-5);
-  overflow: auto;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 </style>

@@ -1,6 +1,8 @@
 // SFTP 文件操作：复用已建立的 SSH 连接，按需打开 sftp 子系统通道。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "windows"))]
+use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -388,4 +390,63 @@ pub async fn ensure_dir(path: String) -> Result<(), String> {
     tokio::fs::create_dir_all(&path)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// 确保本地目录存在并用系统文件管理器打开。
+#[tauri::command]
+pub async fn open_dir(path: String) -> Result<(), String> {
+    tokio::fs::create_dir_all(&path)
+        .await
+        .map_err(|e| format!("创建目录失败：{e}"))?;
+    open_local_path_inner(Path::new(&path))
+}
+
+/// 用系统默认程序打开本地文件或目录。
+#[tauri::command]
+pub async fn open_local_path(path: String) -> Result<(), String> {
+    tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| format!("本地路径不可访问：{e}"))?;
+    open_local_path_inner(Path::new(&path))
+}
+
+#[cfg(target_os = "windows")]
+fn open_local_path_inner(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as isize <= 32 {
+        return Err(format!("打开本地路径失败：ShellExecuteW 错误 {}", result as isize));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_local_path_inner(path: &Path) -> Result<(), String> {
+    Command::new("open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开本地路径失败：{e}"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_local_path_inner(path: &Path) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开本地路径失败：{e}"))
 }

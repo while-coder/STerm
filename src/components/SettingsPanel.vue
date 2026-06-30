@@ -2,9 +2,8 @@
 // 设置面板：主题、终端外观、SFTP 行为。直接读写 useSettings 单例。
 import { computed, onMounted, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { appDataDir, join } from "@tauri-apps/api/path";
-import { ensureDir } from "../api";
+import { openDir } from "../api";
 import { useSettings } from "../composables/useSettings";
 import { useSecurity } from "../composables/useSecurity";
 import { TERMINAL_FONTS, TERMINAL_SCHEMES } from "../terminalThemes";
@@ -42,11 +41,15 @@ async function openCacheDir() {
   if (!dir) return;
   cacheDirMsg.value = "";
   try {
-    await ensureDir(dir);
-    await openPath(dir);
+    await openDir(dir);
   } catch (e) {
     cacheDirMsg.value = e instanceof Error ? e.message : String(e);
   }
+}
+
+function resetCacheDir() {
+  settings.sftpCacheDir = "";
+  cacheDirMsg.value = "已重置为应用缓存目录";
 }
 
 function openChangeMasterPassword() {
@@ -203,23 +206,22 @@ onMounted(async () => {
           <button type="button" @click="settings.maxParallelTransfers++; clampParallel()">＋</button>
         </span>
       </label>
-      <label class="setting-row">
+      <label class="setting-row cache-row">
         <span>
           <strong>查看缓存目录</strong>
-          <small>当前：{{ effectiveCacheDir || "正在获取应用数据目录…" }}</small>
-        </span>
-        <span class="path-pick">
-          <input
-            v-model="settings.sftpCacheDir"
-            :placeholder="defaultCacheDir || '应用数据目录'"
-            :title="effectiveCacheDir"
-          />
-          <span class="path-actions">
-            <button type="button" title="打开当前缓存目录" @click="openCacheDir">打开</button>
-            <button type="button" title="选择缓存目录" @click="pickCacheDir">选择</button>
-          </span>
+          <small>双击查看文件时下载到此目录再用系统程序打开。</small>
         </span>
       </label>
+      <div class="cache-dir-control">
+        <div class="cache-dir-path" :title="effectiveCacheDir">
+          {{ effectiveCacheDir || "正在获取应用数据目录…" }}
+        </div>
+        <div class="cache-dir-actions">
+          <button type="button" title="打开当前缓存目录" @click="openCacheDir">打开目录</button>
+          <button type="button" title="选择缓存目录" @click="pickCacheDir">选择目录</button>
+          <button type="button" title="重置为应用缓存目录" @click="resetCacheDir">重置</button>
+        </div>
+      </div>
       <p v-if="cacheDirMsg" class="setting-msg">{{ cacheDirMsg }}</p>
     </section>
 
@@ -304,6 +306,7 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-4);
+  min-width: 0;
   min-height: 54px;
   padding: var(--sp-3) 0;
 }
@@ -314,6 +317,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
+  min-width: 0;
 }
 .setting-row small {
   color: var(--muted);
@@ -360,21 +364,37 @@ onMounted(async () => {
   background: var(--surface-2);
   color: var(--text);
 }
-.path-pick {
-  flex-direction: row !important;
-  align-items: center;
-  gap: var(--sp-1);
+.cache-row {
+  min-height: 0;
+  padding-bottom: var(--sp-2);
 }
-.path-pick input {
-  width: 180px;
+.cache-dir-control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-3);
+}
+.cache-dir-path {
+  min-width: 0;
   min-height: 32px;
-  padding: 0 var(--sp-2);
+  padding: 6px var(--sp-2);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
-.path-pick button {
+.cache-dir-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+  white-space: nowrap;
+}
+.cache-dir-actions button {
   min-height: 32px;
   padding: 0 var(--sp-2);
   border: 1px solid var(--line);
@@ -382,8 +402,9 @@ onMounted(async () => {
   background: var(--surface-3);
   color: var(--text);
   cursor: pointer;
+  white-space: nowrap;
 }
-.path-pick button:hover {
+.cache-dir-actions button:hover {
   border-color: var(--accent);
 }
 .change-password-btn {

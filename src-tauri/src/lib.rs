@@ -36,6 +36,8 @@ pub fn run() {
             sftp::sftp_rename,
             sftp::sftp_remove,
             sftp::ensure_dir,
+            sftp::open_dir,
+            sftp::open_local_path,
             portab::read_text_file,
             portab::write_text_file,
             portab::import_private_key,
