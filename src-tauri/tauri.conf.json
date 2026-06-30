@@ -34,7 +34,9 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "both"
+        "installMode": "both",
+        "languages": ["SimpChinese", "English", "TradChinese"],
+        "displayLanguageSelector": true
       }
     }
   },
