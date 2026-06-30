@@ -79,13 +79,13 @@ pub struct ConnectOpts {
     pub rows: u32,
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from)
 }
 
-fn expand_home_path(path: &str) -> PathBuf {
+pub(crate) fn expand_home_path(path: &str) -> PathBuf {
     if path == "~" {
         return home_dir().unwrap_or_else(|| PathBuf::from(path));
     }

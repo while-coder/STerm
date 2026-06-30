@@ -1,3 +1,4 @@
+mod portab;
 mod sftp;
 mod ssh;
 mod state;
@@ -34,6 +35,9 @@ pub fn run() {
             sftp::sftp_rename,
             sftp::sftp_remove,
             sftp::ensure_dir,
+            portab::read_text_file,
+            portab::write_text_file,
+            portab::import_private_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

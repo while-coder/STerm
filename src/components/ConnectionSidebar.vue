@@ -13,6 +13,8 @@ const emit = defineEmits<{
   new: [];
   close: [];
   settings: [];
+  export: [];
+  import: [];
 }>();
 
 const { connections, query, grouped, remove, toggleFavorite } = useConnections();
@@ -52,6 +54,8 @@ function onMenuSelect(key: string) {
     <header v-if="!hideHeader" class="head">
       <div class="brand">STerm</div>
       <div class="head-actions">
+        <button class="icon" type="button" title="导出机器列表" @click="emit('export')">⬆</button>
+        <button class="icon" type="button" title="导入机器列表" @click="emit('import')">⬇</button>
         <button class="icon" type="button" title="设置" @click="emit('settings')">⚙</button>
         <button
           v-if="mobile"

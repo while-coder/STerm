@@ -1,10 +1,12 @@
 <script setup lang="ts">
 // 响应式布局骨架：桌面 = 侧栏 + 主区（标签 + 终端 + SFTP）；移动端 = 抽屉 + 全屏视图。
 import { computed, ref } from "vue";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import type { SavedConnection } from "../api";
 import { useResponsive } from "../composables/useResponsive";
 import { useSettings } from "../composables/useSettings";
 import { useConnections } from "../composables/useConnections";
+import { usePortab } from "../composables/usePortab";
 import { useSessions, type SessionTab } from "../composables/useSessions";
 import ConnectionSidebar from "./ConnectionSidebar.vue";
 import SessionTabs from "./SessionTabs.vue";
@@ -13,10 +15,12 @@ import SftpPanel from "./SftpPanel.vue";
 import BaseSheet from "./BaseSheet.vue";
 import ConnectionForm from "./ConnectionForm.vue";
 import SettingsPanel from "./SettingsPanel.vue";
+import PasswordPrompt from "./PasswordPrompt.vue";
 
 const { isMobile } = useResponsive();
 const { settings, resolvedTheme } = useSettings();
-const { save } = useConnections();
+const { save: saveConn } = useConnections();
+const { exportConnections, importConnections } = usePortab();
 const {
   tabs,
   activeTabId,
@@ -36,6 +40,61 @@ const settingsOpen = ref(false);
 const drawerOpen = ref(false);
 const pickerOpen = ref(false);
 const mobileView = ref<"term" | "sftp">("term");
+
+// —— 导入 / 导出 ——
+const passwordPrompt = ref<{ open: boolean; mode: "export" | "import"; path: string }>({
+  open: false,
+  mode: "export",
+  path: "",
+});
+const portabBusy = ref(false);
+const portabMsg = ref("");
+
+// 导出：先选保存路径，再弹口令对话框。
+async function onExport() {
+  drawerOpen.value = false;
+  const path = await save({
+    title: "导出机器列表",
+    defaultPath: "sterm-connections.json",
+    filters: [{ name: "STerm 导出文件", extensions: ["json"] }],
+  });
+  if (typeof path !== "string") return;
+  passwordPrompt.value = { open: true, mode: "export", path };
+}
+
+// 导入：先选文件，再弹口令对话框。
+async function onImport() {
+  drawerOpen.value = false;
+  const path = await open({
+    multiple: false,
+    title: "导入机器列表",
+    filters: [{ name: "STerm 导出文件", extensions: ["json"] }],
+  });
+  if (typeof path !== "string") return;
+  passwordPrompt.value = { open: true, mode: "import", path };
+}
+
+// 口令确认：执行实际导入 / 导出。
+async function onPortabConfirm(password: string) {
+  const { mode, path } = passwordPrompt.value;
+  passwordPrompt.value.open = false;
+  portabBusy.value = true;
+  portabMsg.value = "";
+  try {
+    const res =
+      mode === "export"
+        ? await exportConnections(password, path)
+        : await importConnections(password, path);
+    const action = mode === "export" ? "导出" : "导入";
+    let msg = `已${action} ${res.count} 条连接`;
+    if (res.warnings.length) msg += `（${res.warnings.length} 项告警：${res.warnings.join("；")}）`;
+    portabMsg.value = msg;
+  } catch (e) {
+    portabMsg.value = `操作失败：${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    portabBusy.value = false;
+  }
+}
 
 const showSftp = computed(() => settings.showSftp && !!activeSftpTab.value);
 const showSidebar = computed(
@@ -78,12 +137,12 @@ function openEdit(conn: SavedConnection) {
 }
 
 function onFormSave(conn: SavedConnection) {
-  save(conn);
+  saveConn(conn);
   formOpen.value = false;
 }
 
 function onFormConnect(conn: SavedConnection) {
-  save(conn);
+  saveConn(conn);
   doConnect(conn);
 }
 
@@ -156,6 +215,8 @@ function startResize(e: PointerEvent) {
         @edit="openEdit"
         @new="openNew"
         @settings="settingsOpen = true"
+        @export="onExport"
+        @import="onImport"
       />
     </div>
     <div
@@ -174,6 +235,8 @@ function startResize(e: PointerEvent) {
           @edit="openEdit"
           @new="openNew"
           @settings="settingsOpen = true"
+          @export="onExport"
+          @import="onImport"
           @close="drawerOpen = false"
         />
       </div>
@@ -190,6 +253,8 @@ function startResize(e: PointerEvent) {
           @edit="openEdit"
           @new="openNew"
           @settings="settingsOpen = true"
+          @export="onExport"
+          @import="onImport"
         />
       </template>
 
@@ -289,6 +354,19 @@ function startResize(e: PointerEvent) {
     <BaseSheet v-if="settingsOpen" title="设置" subtitle="调整界面和 SFTP 行为" @close="settingsOpen = false">
       <SettingsPanel />
     </BaseSheet>
+
+    <!-- 导入 / 导出口令 -->
+    <PasswordPrompt
+      v-if="passwordPrompt.open"
+      :mode="passwordPrompt.mode"
+      @confirm="onPortabConfirm"
+      @cancel="passwordPrompt.open = false"
+    />
+
+    <!-- 导入 / 导出结果提示 -->
+    <div v-if="portabBusy || portabMsg" class="portab-toast" @click="portabMsg = ''">
+      {{ portabBusy ? "处理中…" : portabMsg }}
+    </div>
   </div>
 </template>
 
@@ -388,6 +466,24 @@ function startResize(e: PointerEvent) {
 .picker-list {
   height: auto;
   margin: calc(var(--sp-3) * -1) 0;
+}
+
+/* 导入 / 导出结果提示 */
+.portab-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--safe-bottom) + var(--sp-5));
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: min(90vw, 560px);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  box-shadow: var(--shadow);
+  cursor: pointer;
 }
 
 /* 移动端终端 / 文件切换 */

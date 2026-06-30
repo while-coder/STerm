@@ -41,12 +41,23 @@ export interface FileEntry {
   modified: number;
 }
 
+/** 导出文件中的连接条目：在 SavedConnection 基础上可携带私钥文件内容。 */
+export type ExportedConnection = SavedConnection & { privateKey?: string };
+
 export const sshConnect = (opts: ConnectOpts) => invoke<void>("ssh_connect", { opts });
 export const sshWrite = (id: string, data: string) => invoke<void>("ssh_write", { id, data });
 export const sshResize = (id: string, cols: number, rows: number) =>
   invoke<void>("ssh_resize", { id, cols, rows });
 export const sshDisconnect = (id: string) => invoke<void>("ssh_disconnect", { id });
 export const defaultPrivateKeyPath = () => invoke<string>("default_private_key_path");
+
+// —— 导入 / 导出文件读写 ——
+export const readTextFile = (path: string) => invoke<string>("read_text_file", { path });
+export const writeTextFile = (path: string, contents: string) =>
+  invoke<void>("write_text_file", { path, contents });
+/** 把导入的私钥内容写到 ~/.ssh/sterm-keys/<id>，返回落盘后的路径。 */
+export const importPrivateKey = (id: string, contents: string) =>
+  invoke<string>("import_private_key", { id, contents });
 
 export const sftpHome = (id: string) => invoke<string>("sftp_home", { id });
 export const sftpList = (id: string, path: string) =>
