@@ -5,10 +5,34 @@ mod ssh;
 mod state;
 
 use state::AppState;
+use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        // 日志插件需最先注册，以便捕获其余插件与命令的日志。
+        // 同时输出到标准输出与应用日志目录文件（前端日志经 plugin-log 转发至此）。
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::LogDir {
+                        file_name: Some("sterm".into()),
+                    }),
+                ])
+                // 单文件上限 5MB，超出后滚动并保留历史文件。
+                .max_file_size(5_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                // 使用本地时区，便于排查问题时与系统时间对齐。
+                .timezone_strategy(TimezoneStrategy::UseLocal)
+                // 开发期记录到 Trace，发布版仅记录 Info 及以上。
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Trace
+                } else {
+                    log::LevelFilter::Info
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init());
 

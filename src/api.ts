@@ -72,8 +72,9 @@ export const sftpDownload = (
   id: string,
   remotePath: string,
   localPath: string,
-  transferId: string
-) => invoke<void>("sftp_download", { id, remotePath, localPath, transferId });
+  transferId: string,
+  expectedSize?: number
+) => invoke<void>("sftp_download", { id, remotePath, localPath, transferId, expectedSize });
 export const sftpDownloadDir = (
   id: string,
   remotePath: string,

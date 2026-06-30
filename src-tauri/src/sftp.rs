@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -76,6 +76,11 @@ where
             res = src.read(&mut buf[..read_len]) => res?,
         };
         if n == 0 {
+            if let Some(expected) = expected_bytes {
+                if file_done < expected {
+                    bail!("远端文件提前结束：已读取 {file_done} / {expected} 字节");
+                }
+            }
             break;
         }
         tokio::select! {
@@ -199,6 +204,7 @@ pub async fn sftp_download(
     remote_path: String,
     local_path: String,
     transfer_id: String,
+    expected_size: Option<u64>,
 ) -> Result<(), String> {
     let entry = fetch_entry(&state, &id).await?;
     let token = register_transfer(&state, &transfer_id).await;
@@ -208,6 +214,7 @@ pub async fn sftp_download(
         &remote_path,
         &local_path,
         &transfer_id,
+        expected_size,
         &token,
     )
     .await;
@@ -225,11 +232,15 @@ async fn download_inner(
     remote: &str,
     local: &str,
     transfer_id: &str,
+    expected_size: Option<u64>,
     token: &CancellationToken,
 ) -> Result<bool> {
     let sftp = get_sftp(entry).await?;
     let event = format!("sftp-progress-{transfer_id}");
-    let expected = sftp.metadata(remote).await.ok().and_then(|m| m.size);
+    let expected = match expected_size {
+        Some(size) => Some(size),
+        None => sftp.metadata(remote).await.ok().and_then(|m| m.size),
+    };
     let total = expected.unwrap_or(0);
     let mut src = sftp.open(remote).await?;
     let mut dst = tokio::fs::File::create(local).await?;
@@ -503,11 +514,30 @@ fn open_local_path_inner(path: &Path) -> Result<(), String> {
     };
     if result as isize <= 32 {
         return Err(format!(
-            "打开本地路径失败：ShellExecuteW 错误 {}",
-            result as isize
+            "打开本地路径失败：{}",
+            shell_execute_error(result as isize)
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn shell_execute_error(code: isize) -> String {
+    match code {
+        2 => "文件不存在".to_string(),
+        3 => "路径不存在".to_string(),
+        5 => "没有权限访问该路径".to_string(),
+        8 => "系统内存不足".to_string(),
+        11 => "文件格式无效".to_string(),
+        26 => "文件正在被共享占用".to_string(),
+        27 => "文件关联不完整".to_string(),
+        28 => "打开默认应用超时".to_string(),
+        29 => "默认应用响应失败".to_string(),
+        30 => "默认应用忙碌".to_string(),
+        31 => "没有关联的默认应用".to_string(),
+        32 => "打开默认应用所需组件缺失".to_string(),
+        _ => format!("系统错误 {code}"),
+    }
 }
 
 #[cfg(target_os = "macos")]

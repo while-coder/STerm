@@ -71,8 +71,13 @@ function startTransfer(opts: {
 }) {
   return enqueue({ ...opts, sessionId: props.id, sessionLabel: props.sessionLabel ?? props.id });
 }
-function transferPercent(t: { transferred: number; total: number; status: string }): number {
-  if (t.status === "done") return 100;
+function transferPercent(t: {
+  transferred: number;
+  total: number;
+  status: string;
+  progressDone?: boolean;
+}): number {
+  if (t.status === "done" || t.progressDone) return 100;
   if (!t.total) return 0;
   return Math.min(100, Math.round((t.transferred / t.total) * 100));
 }
@@ -226,6 +231,11 @@ function joinLocal(dir: string, name: string): string {
   const sep = dir.includes("\\") ? "\\" : "/";
   return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
 }
+
+function knownFileSize(entry: FileEntry): number | undefined {
+  return entry.size > 0 ? entry.size : undefined;
+}
+
 async function downloadItems(items: FileEntry[]) {
   if (!items.length) return;
   const dir = await open({ directory: true });
@@ -239,7 +249,7 @@ async function downloadItems(items: FileEntry[]) {
       start: (tid) =>
         it.isDir
           ? sftpDownloadDir(props.id, it.path, target, tid)
-          : sftpDownload(props.id, it.path, target, tid),
+          : sftpDownload(props.id, it.path, target, tid, knownFileSize(it)),
     });
   }
   clearSelection();
@@ -334,8 +344,10 @@ async function openFile(entry: FileEntry) {
       name: entry.name,
       withProgress: true,
       start: async (tid) => {
-        await sftpDownload(props.id, entry.path, local, tid);
-        await openLocalPath(local);
+        await sftpDownload(props.id, entry.path, local, tid, knownFileSize(entry));
+        void openLocalPath(local).catch((e) => {
+          error.value = `打开本地文件失败：${String(e)}`;
+        });
       },
     });
   } catch (e) {
@@ -366,7 +378,7 @@ async function download(entry: FileEntry) {
     kind: "download",
     name: entry.name,
     withProgress: true,
-    start: (tid) => sftpDownload(props.id, entry.path, target, tid),
+    start: (tid) => sftpDownload(props.id, entry.path, target, tid, knownFileSize(entry)),
   });
 }
 

@@ -14,6 +14,7 @@ export interface Transfer {
   status: TransferStatus;
   transferred: number;
   total: number;
+  progressDone: boolean;
   error?: string;
   /** 所属会话（用于按 session 过滤 / 分组）。 */
   sessionId: string;
@@ -55,6 +56,11 @@ async function runTask(task: PendingTask) {
     unlisten = await listen<ProgressPayload>(`sftp-progress-${transfer.id}`, (e) => {
       transfer.transferred = e.payload.transferred;
       transfer.total = e.payload.total;
+      transfer.progressDone = e.payload.done;
+      if (e.payload.done && e.payload.total === 0) {
+        transfer.transferred = 1;
+        transfer.total = 1;
+      }
     });
   }
   try {
@@ -111,6 +117,7 @@ function enqueue(opts: {
     status: "queued",
     transferred: 0,
     total: 0,
+    progressDone: false,
     sessionId: opts.sessionId,
     sessionLabel: opts.sessionLabel,
   };
