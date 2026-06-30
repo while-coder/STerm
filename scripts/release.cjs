@@ -4,7 +4,6 @@ const path = require('path');
 const fs = require('fs');
 
 const PKG_JSON = 'package.json';
-const TAURI_CONF = 'src-tauri/tauri.conf.json';
 const TAG_PREFIX = 'v';
 const CHANGELOG = 'CHANGELOG.md';
 const WORKFLOW_NAME = 'Release';
@@ -64,9 +63,8 @@ function changelogHasVersion(file, version) {
 function main() {
   const arg = process.argv[2];
   const root = path.resolve(__dirname, '..');
-  // 版本以根 package.json 为准，发布时同步写入 tauri.conf.json
+  // 版本以根 package.json 为准（tauri.conf.json 的 version 指向 ../package.json，无需再写）
   const pkgPath = path.join(root, PKG_JSON);
-  const tauriPath = path.join(root, TAURI_CONF);
   const pkg = readJson(pkgPath);
 
   const currentVersion = pkg.version;
@@ -115,11 +113,7 @@ function main() {
     pkg.version = nextVersion;
     writeJson(pkgPath, pkg);
 
-    const tauriConf = readJson(tauriPath);
-    tauriConf.version = nextVersion;
-    writeJson(tauriPath, tauriConf);
-
-    run(`git add "${PKG_JSON}" "${TAURI_CONF}"`);
+    run(`git add "${PKG_JSON}"`);
     run(`git commit -m "chore: release v${nextVersion}"`);
   }
 
