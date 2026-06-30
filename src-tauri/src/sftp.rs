@@ -44,6 +44,7 @@ async fn copy_emit<R, W>(
     dst: &mut W,
     total: u64,
     done: &mut u64,
+    expected_bytes: Option<u64>,
     app: &AppHandle,
     event: &str,
     token: &CancellationToken,
@@ -55,16 +56,34 @@ where
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut buf = vec![0u8; 64 * 1024];
     let mut last = *done;
+    let mut file_done = 0u64;
     loop {
         if token.is_cancelled() {
             return Ok(false);
         }
-        let n = src.read(&mut buf).await?;
+        let read_len = match expected_bytes {
+            Some(expected) if file_done >= expected => break,
+            Some(expected) => {
+                usize::try_from((expected - file_done).min(buf.len() as u64)).unwrap_or(buf.len())
+            }
+            None => buf.len(),
+        };
+        if read_len == 0 {
+            break;
+        }
+        let n = tokio::select! {
+            _ = token.cancelled() => return Ok(false),
+            res = src.read(&mut buf[..read_len]) => res?,
+        };
         if n == 0 {
             break;
         }
-        dst.write_all(&buf[..n]).await?;
+        tokio::select! {
+            _ = token.cancelled() => return Ok(false),
+            res = dst.write_all(&buf[..n]) => res?,
+        };
         *done += n as u64;
+        file_done += n as u64;
         // 每累计约 512KB 上报一次，避免事件风暴。
         if *done - last >= 512 * 1024 {
             last = *done;
@@ -78,7 +97,10 @@ where
             );
         }
     }
-    dst.flush().await?;
+    tokio::select! {
+        _ = token.cancelled() => return Ok(false),
+        res = dst.flush() => res?,
+    };
     Ok(true)
 }
 
@@ -180,7 +202,15 @@ pub async fn sftp_download(
 ) -> Result<(), String> {
     let entry = fetch_entry(&state, &id).await?;
     let token = register_transfer(&state, &transfer_id).await;
-    let res = download_inner(&app, &entry, &remote_path, &local_path, &transfer_id, &token).await;
+    let res = download_inner(
+        &app,
+        &entry,
+        &remote_path,
+        &local_path,
+        &transfer_id,
+        &token,
+    )
+    .await;
     unregister_transfer(&state, &transfer_id).await;
     match res {
         Ok(true) => Ok(()),
@@ -199,11 +229,15 @@ async fn download_inner(
 ) -> Result<bool> {
     let sftp = get_sftp(entry).await?;
     let event = format!("sftp-progress-{transfer_id}");
-    let total = sftp.metadata(remote).await.ok().and_then(|m| m.size).unwrap_or(0);
+    let expected = sftp.metadata(remote).await.ok().and_then(|m| m.size);
+    let total = expected.unwrap_or(0);
     let mut src = sftp.open(remote).await?;
     let mut dst = tokio::fs::File::create(local).await?;
     let mut done = 0u64;
-    let completed = copy_emit(&mut src, &mut dst, total, &mut done, app, &event, token).await?;
+    let completed = copy_emit(
+        &mut src, &mut dst, total, &mut done, expected, app, &event, token,
+    )
+    .await?;
     if !completed {
         drop(dst);
         let _ = tokio::fs::remove_file(local).await; // 清理半成品
@@ -231,7 +265,15 @@ pub async fn sftp_upload(
 ) -> Result<(), String> {
     let entry = fetch_entry(&state, &id).await?;
     let token = register_transfer(&state, &transfer_id).await;
-    let res = upload_inner(&app, &entry, &local_path, &remote_path, &transfer_id, &token).await;
+    let res = upload_inner(
+        &app,
+        &entry,
+        &local_path,
+        &remote_path,
+        &transfer_id,
+        &token,
+    )
+    .await;
     unregister_transfer(&state, &transfer_id).await;
     match res {
         Ok(true) => Ok(()),
@@ -251,11 +293,15 @@ async fn upload_inner(
     use tokio::io::AsyncWriteExt;
     let sftp = get_sftp(entry).await?;
     let event = format!("sftp-progress-{transfer_id}");
-    let total = tokio::fs::metadata(local).await.map(|m| m.len()).unwrap_or(0);
+    let expected = tokio::fs::metadata(local).await.ok().map(|m| m.len());
+    let total = expected.unwrap_or(0);
     let mut src = tokio::fs::File::open(local).await?;
     let mut dst = sftp.create(remote).await?;
     let mut done = 0u64;
-    let completed = copy_emit(&mut src, &mut dst, total, &mut done, app, &event, token).await?;
+    let completed = copy_emit(
+        &mut src, &mut dst, total, &mut done, expected, app, &event, token,
+    )
+    .await?;
     if !completed {
         let _ = dst.shutdown().await;
         let _ = sftp.remove_file(remote).await; // 清理半成品
@@ -284,7 +330,15 @@ pub async fn sftp_download_dir(
 ) -> Result<(), String> {
     let entry = fetch_entry(&state, &id).await?;
     let token = register_transfer(&state, &transfer_id).await;
-    let res = download_dir_inner(&app, &entry, &remote_path, &local_path, &transfer_id, &token).await;
+    let res = download_dir_inner(
+        &app,
+        &entry,
+        &remote_path,
+        &local_path,
+        &transfer_id,
+        &token,
+    )
+    .await;
     unregister_transfer(&state, &transfer_id).await;
     match res {
         Ok(true) => Ok(()),
@@ -307,9 +361,10 @@ async fn download_dir_inner(
     let event = format!("sftp-progress-{transfer_id}");
 
     // 1) 遍历：建本地目录、收集文件清单与总字节。
-    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    let mut files: Vec<(String, PathBuf, u64)> = Vec::new();
     let mut total = 0u64;
-    let mut stack: Vec<(String, PathBuf)> = vec![(remote_root.to_string(), PathBuf::from(local_root))];
+    let mut stack: Vec<(String, PathBuf)> =
+        vec![(remote_root.to_string(), PathBuf::from(local_root))];
     while let Some((remote, local)) = stack.pop() {
         tokio::fs::create_dir_all(&local).await?;
         for item in sftp.read_dir(&remote).await? {
@@ -320,18 +375,29 @@ async fn download_dir_inner(
             if meta.is_dir() {
                 stack.push((remote_child, local_child));
             } else {
-                total += meta.size.unwrap_or(0);
-                files.push((remote_child, local_child));
+                let size = meta.size.unwrap_or(0);
+                total += size;
+                files.push((remote_child, local_child, size));
             }
         }
     }
 
     // 2) 逐文件拷贝，done 跨文件累加。
     let mut done = 0u64;
-    for (remote_child, local_child) in files {
+    for (remote_child, local_child, size) in files {
         let mut src = sftp.open(&remote_child).await?;
         let mut dst = tokio::fs::File::create(&local_child).await?;
-        let completed = copy_emit(&mut src, &mut dst, total, &mut done, app, &event, token).await?;
+        let completed = copy_emit(
+            &mut src,
+            &mut dst,
+            total,
+            &mut done,
+            Some(size),
+            app,
+            &event,
+            token,
+        )
+        .await?;
         if !completed {
             drop(dst);
             let _ = tokio::fs::remove_file(&local_child).await; // 清理半成品（已完成文件保留）
@@ -350,7 +416,11 @@ async fn download_dir_inner(
 }
 
 #[tauri::command]
-pub async fn sftp_mkdir(state: State<'_, AppState>, id: String, path: String) -> Result<(), String> {
+pub async fn sftp_mkdir(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> Result<(), String> {
     let entry = fetch_entry(&state, &id).await?;
     let sftp = get_sftp(&entry).await.map_err(|e| e.to_string())?;
     sftp.create_dir(path).await.map_err(|e| e.to_string())
@@ -416,7 +486,11 @@ fn open_local_path_inner(path: &Path) -> Result<(), String> {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    let file: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let file: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
@@ -428,7 +502,10 @@ fn open_local_path_inner(path: &Path) -> Result<(), String> {
         )
     };
     if result as isize <= 32 {
-        return Err(format!("打开本地路径失败：ShellExecuteW 错误 {}", result as isize));
+        return Err(format!(
+            "打开本地路径失败：ShellExecuteW 错误 {}",
+            result as isize
+        ));
     }
     Ok(())
 }

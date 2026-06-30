@@ -3,7 +3,6 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -16,6 +15,7 @@ import {
   sftpRename,
   sftpRemove,
   ensureDir,
+  openLocalPath,
   type FileEntry,
 } from "../api";
 import { useLongPress } from "../composables/useLongPress";
@@ -335,7 +335,7 @@ async function openFile(entry: FileEntry) {
       withProgress: true,
       start: async (tid) => {
         await sftpDownload(props.id, entry.path, local, tid);
-        await openPath(local);
+        await openLocalPath(local);
       },
     });
   } catch (e) {

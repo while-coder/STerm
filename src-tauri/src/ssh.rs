@@ -124,7 +124,11 @@ pub async fn ssh_connect(
         .map_err(|e| e.to_string())
 }
 
-async fn connect_inner(app: AppHandle, state: State<'_, AppState>, opts: ConnectOpts) -> Result<()> {
+async fn connect_inner(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    opts: ConnectOpts,
+) -> Result<()> {
     let config = Arc::new(client::Config::default());
     let mut handle =
         client::connect(config, (opts.host.as_str(), opts.port), ClientHandler).await?;
@@ -134,7 +138,9 @@ async fn connect_inner(app: AppHandle, state: State<'_, AppState>, opts: Connect
         AuthMethod::Password => {
             let pw = opts.password.clone().ok_or_else(|| anyhow!("缺少密码"))?;
             matches!(
-                handle.authenticate_password(opts.username.as_str(), pw).await?,
+                handle
+                    .authenticate_password(opts.username.as_str(), pw)
+                    .await?,
                 AuthResult::Success
             )
         }

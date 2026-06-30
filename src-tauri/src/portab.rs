@@ -31,7 +31,13 @@ pub fn import_private_key(id: String, contents: String) -> Result<String, String
     // 防止 id 中的路径分隔符越权到其他目录。
     let safe_id: String = id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if safe_id.is_empty() {
         return Err("无效的私钥标识".into());
