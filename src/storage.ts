@@ -1,5 +1,7 @@
-// 已保存连接的本地持久化（localStorage）。密码仅在条目 remember 为 true 时写入。
+// 已保存连接的本地持久化（localStorage）。机器列表整体加密保存；
+// 密码仅在条目 remember 为 true 时进入加密载荷。
 import type { SavedConnection } from "./api";
+import { decryptJson, encryptJson, type EncryptedEnvelope } from "./crypto";
 
 export type ThemeMode = "system" | "dark" | "light";
 
@@ -49,19 +51,43 @@ const DEFAULT_SETTINGS: AppSettings = {
   sftpCacheDir: "",
 };
 
-export function loadConnections(): SavedConnection[] {
+interface ConnectionsStorePayload {
+  connections: SavedConnection[];
+}
+
+function isEncryptedStore(value: unknown): value is EncryptedEnvelope {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Partial<EncryptedEnvelope>).app === "STerm" &&
+    (value as Partial<EncryptedEnvelope>).type === "connections-store"
+  );
+}
+
+export async function loadConnections(masterPassword: string): Promise<SavedConnection[]> {
   try {
     const raw = localStorage.getItem(CONNECTIONS_KEY);
     if (!raw) return [];
-    const list = JSON.parse(raw);
-    return Array.isArray(list) ? (list as SavedConnection[]) : [];
-  } catch {
+    const parsed = JSON.parse(raw);
+    if (isEncryptedStore(parsed)) {
+      const payload = await decryptJson<ConnectionsStorePayload>(
+        raw,
+        masterPassword,
+        "connections-store"
+      );
+      return Array.isArray(payload?.connections) ? payload.connections : [];
+    }
     return [];
+  } catch {
+    throw new Error("机器列表读取失败：主密码错误或本地数据已损坏");
   }
 }
 
-export function saveConnections(list: SavedConnection[]): void {
-  localStorage.setItem(CONNECTIONS_KEY, JSON.stringify(list));
+export async function saveConnections(list: SavedConnection[], masterPassword: string): Promise<void> {
+  if (!masterPassword) throw new Error("缺少主密码，无法保存机器列表");
+  const payload: ConnectionsStorePayload = { connections: list };
+  const text = await encryptJson(payload, masterPassword, "connections-store");
+  localStorage.setItem(CONNECTIONS_KEY, text);
 }
 
 export function loadSettings(): AppSettings {
@@ -89,13 +115,9 @@ export function upsertConnection(
     delete clean.passphrase;
   }
   const idx = list.findIndex((c) => c.id === clean.id);
-  const next = idx >= 0 ? list.map((c, i) => (i === idx ? clean : c)) : [...list, clean];
-  saveConnections(next);
-  return next;
+  return idx >= 0 ? list.map((c, i) => (i === idx ? clean : c)) : [...list, clean];
 }
 
 export function removeConnection(list: SavedConnection[], id: string): SavedConnection[] {
-  const next = list.filter((c) => c.id !== id);
-  saveConnections(next);
-  return next;
+  return list.filter((c) => c.id !== id);
 }

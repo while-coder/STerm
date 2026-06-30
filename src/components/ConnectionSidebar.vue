@@ -54,8 +54,6 @@ function onMenuSelect(key: string) {
     <header v-if="!hideHeader" class="head">
       <div class="brand">STerm</div>
       <div class="head-actions">
-        <button class="icon" type="button" title="导出机器列表" @click="emit('export')">⬆</button>
-        <button class="icon" type="button" title="导入机器列表" @click="emit('import')">⬇</button>
         <button class="icon" type="button" title="设置" @click="emit('settings')">⚙</button>
         <button
           v-if="mobile"
@@ -68,6 +66,17 @@ function onMenuSelect(key: string) {
         </button>
       </div>
     </header>
+
+    <div v-if="!hideHeader" class="quick-actions" aria-label="机器列表导入导出">
+      <button class="tool-btn" type="button" title="导入机器列表" @click="emit('import')">
+        <span class="tool-icon">↓</span>
+        <span>导入</span>
+      </button>
+      <button class="tool-btn" type="button" title="导出机器列表" @click="emit('export')">
+        <span class="tool-icon">↑</span>
+        <span>导出</span>
+      </button>
+    </div>
 
     <div class="search">
       <input v-model="query" type="search" placeholder="搜索机器…" />
@@ -136,6 +145,7 @@ function onMenuSelect(key: string) {
   border-right: 0;
 }
 .sidebar.home .search,
+.sidebar.home .quick-actions,
 .sidebar.home .new,
 .sidebar.home .list {
   width: 100%;
@@ -158,6 +168,40 @@ function onMenuSelect(key: string) {
 .head-actions {
   display: flex;
   gap: 2px;
+}
+.quick-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-3) 0;
+}
+.tool-btn {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.tool-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.tool-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--accent-hover);
+  line-height: 1;
 }
 .search {
   padding: var(--sp-3) var(--sp-3) var(--sp-2);

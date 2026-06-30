@@ -1,13 +1,15 @@
-// 导入 / 导出文件的口令加密：PBKDF2 派生密钥 + AES-GCM-256。
+// 机器列表本地存储与导入 / 导出文件的口令加密：PBKDF2 派生密钥 + AES-GCM-256。
 // 加密结果是一个自描述的 JSON 信封，包含 KDF 参数、盐、IV 与密文（均 base64）。
 
 const PBKDF2_ITERATIONS = 200_000;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
 
+export type EncryptedEnvelopeType = "connections-store" | "connections-export";
+
 export interface EncryptedEnvelope {
   app: "STerm";
-  type: "connections-export";
+  type: EncryptedEnvelopeType;
   version: 1;
   kdf: { algo: "PBKDF2"; hash: "SHA-256"; iterations: number; salt: string };
   cipher: "AES-GCM";
@@ -50,7 +52,11 @@ async function deriveKey(
 }
 
 /** 用口令加密任意可序列化对象，返回信封 JSON 字符串。 */
-export async function encryptJson(obj: unknown, password: string): Promise<string> {
+export async function encryptJson(
+  obj: unknown,
+  password: string,
+  type: EncryptedEnvelopeType = "connections-export"
+): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const key = await deriveKey(password, salt, PBKDF2_ITERATIONS);
@@ -59,7 +65,7 @@ export async function encryptJson(obj: unknown, password: string): Promise<strin
 
   const envelope: EncryptedEnvelope = {
     app: "STerm",
-    type: "connections-export",
+    type,
     version: 1,
     kdf: { algo: "PBKDF2", hash: "SHA-256", iterations: PBKDF2_ITERATIONS, salt: toBase64(salt) },
     cipher: "AES-GCM",
@@ -70,15 +76,23 @@ export async function encryptJson(obj: unknown, password: string): Promise<strin
 }
 
 /** 解析并用口令解密信封 JSON。口令错误或文件损坏时抛错。 */
-export async function decryptJson<T = unknown>(text: string, password: string): Promise<T> {
+export async function decryptJson<T = unknown>(
+  text: string,
+  password: string,
+  expectedType: EncryptedEnvelopeType = "connections-export"
+): Promise<T> {
   let env: EncryptedEnvelope;
   try {
     env = JSON.parse(text);
   } catch {
     throw new Error("文件格式无效：不是合法的 JSON");
   }
-  if (env?.app !== "STerm" || env?.type !== "connections-export") {
-    throw new Error("文件格式无效：不是 STerm 导出文件");
+  if (env?.app !== "STerm" || env?.type !== expectedType) {
+    throw new Error(
+      expectedType === "connections-export"
+        ? "文件格式无效：不是 STerm 导出文件"
+        : "本地机器列表格式无效"
+    );
   }
   const salt = fromBase64(env.kdf.salt);
   const iv = fromBase64(env.iv);

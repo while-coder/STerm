@@ -1,10 +1,26 @@
 <script setup lang="ts">
 // 设置面板：主题、终端外观、SFTP 行为。直接读写 useSettings 单例。
+import { computed, onMounted, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { appDataDir, join } from "@tauri-apps/api/path";
+import { ensureDir } from "../api";
 import { useSettings } from "../composables/useSettings";
+import { useSecurity } from "../composables/useSecurity";
 import { TERMINAL_FONTS, TERMINAL_SCHEMES } from "../terminalThemes";
+import BaseSheet from "./BaseSheet.vue";
 
 const { settings } = useSettings();
+const { changeMasterPassword } = useSecurity();
+const changePasswordOpen = ref(false);
+const newMasterPassword = ref("");
+const confirmMasterPassword = ref("");
+const securityBusy = ref(false);
+const securityMsg = ref("");
+const passwordDialogError = ref("");
+const defaultCacheDir = ref("");
+const cacheDirMsg = ref("");
+const effectiveCacheDir = computed(() => settings.sftpCacheDir.trim() || defaultCacheDir.value);
 
 function clampFontSize() {
   settings.termFontSize = Math.min(28, Math.max(8, Math.round(settings.termFontSize) || 14));
@@ -15,8 +31,63 @@ function clampParallel() {
 // 选择双击查看时的本地缓存目录。
 async function pickCacheDir() {
   const dir = await open({ directory: true });
-  if (dir && typeof dir === "string") settings.sftpCacheDir = dir;
+  if (dir && typeof dir === "string") {
+    settings.sftpCacheDir = dir;
+    cacheDirMsg.value = "";
+  }
 }
+
+async function openCacheDir() {
+  const dir = effectiveCacheDir.value;
+  if (!dir) return;
+  cacheDirMsg.value = "";
+  try {
+    await ensureDir(dir);
+    await openPath(dir);
+  } catch (e) {
+    cacheDirMsg.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+function openChangeMasterPassword() {
+  newMasterPassword.value = "";
+  confirmMasterPassword.value = "";
+  passwordDialogError.value = "";
+  securityMsg.value = "";
+  changePasswordOpen.value = true;
+}
+
+async function onChangeMasterPassword() {
+  if (!newMasterPassword.value) {
+    passwordDialogError.value = "请输入新的主密码";
+    return;
+  }
+  if (newMasterPassword.value !== confirmMasterPassword.value) {
+    passwordDialogError.value = "两次输入的主密码不一致";
+    return;
+  }
+  securityBusy.value = true;
+  passwordDialogError.value = "";
+  try {
+    await changeMasterPassword(newMasterPassword.value);
+    newMasterPassword.value = "";
+    confirmMasterPassword.value = "";
+    changePasswordOpen.value = false;
+    securityMsg.value = "主密码已更新";
+  } catch (e) {
+    passwordDialogError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    securityBusy.value = false;
+  }
+}
+
+onMounted(async () => {
+  try {
+    defaultCacheDir.value = await join(await appDataDir(), "viewer-cache");
+  } catch (e) {
+    cacheDirMsg.value = e instanceof Error ? e.message : String(e);
+  }
+});
 </script>
 
 <template>
@@ -79,6 +150,20 @@ async function pickCacheDir() {
     </section>
 
     <section class="section">
+      <div class="section-title">安全</div>
+      <label class="setting-row security-row">
+        <span>
+          <strong>主密码</strong>
+          <small>修改后会重新加密本地机器列表，并更新系统凭证。</small>
+        </span>
+        <button class="change-password-btn" type="button" @click="openChangeMasterPassword">
+          修改主密码
+        </button>
+      </label>
+      <p v-if="securityMsg" class="setting-msg">{{ securityMsg }}</p>
+    </section>
+
+    <section class="section">
       <div class="section-title">SFTP</div>
       <label class="setting-row">
         <span>
@@ -121,14 +206,53 @@ async function pickCacheDir() {
       <label class="setting-row">
         <span>
           <strong>查看缓存目录</strong>
-          <small>双击查看文件时下载到此目录再用系统程序打开，留空使用应用数据目录。</small>
+          <small>当前：{{ effectiveCacheDir || "正在获取应用数据目录…" }}</small>
         </span>
         <span class="path-pick">
-          <input v-model="settings.sftpCacheDir" placeholder="（应用数据目录）" />
-          <button type="button" @click="pickCacheDir">选择</button>
+          <input
+            v-model="settings.sftpCacheDir"
+            :placeholder="defaultCacheDir || '应用数据目录'"
+            :title="effectiveCacheDir"
+          />
+          <span class="path-actions">
+            <button type="button" title="打开当前缓存目录" @click="openCacheDir">打开</button>
+            <button type="button" title="选择缓存目录" @click="pickCacheDir">选择</button>
+          </span>
         </span>
       </label>
+      <p v-if="cacheDirMsg" class="setting-msg">{{ cacheDirMsg }}</p>
     </section>
+
+    <BaseSheet
+      v-if="changePasswordOpen"
+      title="修改主密码"
+      subtitle="保存后会重新加密本地机器列表，并更新系统凭证"
+      @close="changePasswordOpen = false"
+    >
+      <form class="password-form" @submit.prevent="onChangeMasterPassword">
+        <input
+          v-model="newMasterPassword"
+          type="password"
+          placeholder="新主密码"
+          autocomplete="new-password"
+        />
+        <input
+          v-model="confirmMasterPassword"
+          type="password"
+          placeholder="再次输入新主密码"
+          autocomplete="new-password"
+        />
+        <p v-if="passwordDialogError" class="error">{{ passwordDialogError }}</p>
+        <div class="dialog-actions">
+          <button type="button" :disabled="securityBusy" @click="changePasswordOpen = false">
+            取消
+          </button>
+          <button type="submit" class="primary" :disabled="securityBusy">
+            {{ securityBusy ? "保存中…" : "保存" }}
+          </button>
+        </div>
+      </form>
+    </BaseSheet>
   </div>
 </template>
 
@@ -261,5 +385,71 @@ async function pickCacheDir() {
 }
 .path-pick button:hover {
   border-color: var(--accent);
+}
+.change-password-btn {
+  min-height: 32px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+  cursor: pointer;
+}
+.change-password-btn:hover {
+  border-color: var(--accent);
+}
+.setting-msg {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.password-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.password-form input {
+  min-height: var(--hit);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-md);
+}
+.dialog-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+.dialog-actions button {
+  min-height: var(--hit);
+  padding: 0 var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  color: var(--text);
+  cursor: pointer;
+}
+.dialog-actions button:hover {
+  border-color: var(--accent);
+}
+.dialog-actions button:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+.dialog-actions .primary {
+  flex: 1;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.dialog-actions .primary:not(:disabled):hover {
+  background: var(--accent-hover);
+}
+.error {
+  margin: 0;
+  color: var(--warn);
+  font-size: var(--fs-sm);
 }
 </style>

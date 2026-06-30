@@ -1,4 +1,5 @@
 mod portab;
+mod credential;
 mod sftp;
 mod ssh;
 mod state;
@@ -38,6 +39,9 @@ pub fn run() {
             portab::read_text_file,
             portab::write_text_file,
             portab::import_private_key,
+            credential::get_master_password,
+            credential::set_master_password,
+            credential::delete_master_password,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -59,6 +59,12 @@ export const writeTextFile = (path: string, contents: string) =>
 export const importPrivateKey = (id: string, contents: string) =>
   invoke<string>("import_private_key", { id, contents });
 
+// —— 系统凭证中的主密码 ——
+export const getMasterPassword = () => invoke<string | null>("get_master_password");
+export const setMasterPassword = (password: string) =>
+  invoke<void>("set_master_password", { password });
+export const deleteMasterPassword = () => invoke<void>("delete_master_password");
+
 export const sftpHome = (id: string) => invoke<string>("sftp_home", { id });
 export const sftpList = (id: string, path: string) =>
   invoke<FileEntry[]>("sftp_list", { id, path });

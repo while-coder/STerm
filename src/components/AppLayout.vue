@@ -15,7 +15,6 @@ import SftpPanel from "./SftpPanel.vue";
 import BaseSheet from "./BaseSheet.vue";
 import ConnectionForm from "./ConnectionForm.vue";
 import SettingsPanel from "./SettingsPanel.vue";
-import PasswordPrompt from "./PasswordPrompt.vue";
 
 const { isMobile } = useResponsive();
 const { settings, resolvedTheme } = useSettings();
@@ -41,16 +40,10 @@ const drawerOpen = ref(false);
 const pickerOpen = ref(false);
 const mobileView = ref<"term" | "sftp">("term");
 
-// —— 导入 / 导出 ——
-const passwordPrompt = ref<{ open: boolean; mode: "export" | "import"; path: string }>({
-  open: false,
-  mode: "export",
-  path: "",
-});
 const portabBusy = ref(false);
 const portabMsg = ref("");
 
-// 导出：先选保存路径，再弹口令对话框。
+// 导出：使用当前主密码加密导出文件。
 async function onExport() {
   drawerOpen.value = false;
   const path = await save({
@@ -59,10 +52,21 @@ async function onExport() {
     filters: [{ name: "STerm 导出文件", extensions: ["json"] }],
   });
   if (typeof path !== "string") return;
-  passwordPrompt.value = { open: true, mode: "export", path };
+  portabBusy.value = true;
+  portabMsg.value = "";
+  try {
+    const res = await exportConnections(path);
+    let msg = `已导出 ${res.count} 条连接`;
+    if (res.warnings.length) msg += `（${res.warnings.length} 项告警：${res.warnings.join("；")}）`;
+    portabMsg.value = msg;
+  } catch (e) {
+    portabMsg.value = `操作失败：${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    portabBusy.value = false;
+  }
 }
 
-// 导入：先选文件，再弹口令对话框。
+// 导入：使用当前主密码解密导入文件。
 async function onImport() {
   drawerOpen.value = false;
   const path = await open({
@@ -71,22 +75,11 @@ async function onImport() {
     filters: [{ name: "STerm 导出文件", extensions: ["json"] }],
   });
   if (typeof path !== "string") return;
-  passwordPrompt.value = { open: true, mode: "import", path };
-}
-
-// 口令确认：执行实际导入 / 导出。
-async function onPortabConfirm(password: string) {
-  const { mode, path } = passwordPrompt.value;
-  passwordPrompt.value.open = false;
   portabBusy.value = true;
   portabMsg.value = "";
   try {
-    const res =
-      mode === "export"
-        ? await exportConnections(password, path)
-        : await importConnections(password, path);
-    const action = mode === "export" ? "导出" : "导入";
-    let msg = `已${action} ${res.count} 条连接`;
+    const res = await importConnections(path);
+    let msg = `已导入 ${res.count} 条连接`;
     if (res.warnings.length) msg += `（${res.warnings.length} 项告警：${res.warnings.join("；")}）`;
     portabMsg.value = msg;
   } catch (e) {
@@ -136,14 +129,22 @@ function openEdit(conn: SavedConnection) {
   pickerOpen.value = false;
 }
 
-function onFormSave(conn: SavedConnection) {
-  saveConn(conn);
-  formOpen.value = false;
+async function onFormSave(conn: SavedConnection) {
+  try {
+    await saveConn(conn);
+    formOpen.value = false;
+  } catch (e) {
+    formError.value = e instanceof Error ? e.message : String(e);
+  }
 }
 
-function onFormConnect(conn: SavedConnection) {
-  saveConn(conn);
-  doConnect(conn);
+async function onFormConnect(conn: SavedConnection) {
+  try {
+    await saveConn(conn);
+    doConnect(conn);
+  } catch (e) {
+    formError.value = e instanceof Error ? e.message : String(e);
+  }
 }
 
 // 连接失败：未建立的会话回到表单补填，并关闭该标签。
@@ -354,14 +355,6 @@ function startResize(e: PointerEvent) {
     <BaseSheet v-if="settingsOpen" title="设置" subtitle="调整界面和 SFTP 行为" @close="settingsOpen = false">
       <SettingsPanel />
     </BaseSheet>
-
-    <!-- 导入 / 导出口令 -->
-    <PasswordPrompt
-      v-if="passwordPrompt.open"
-      :mode="passwordPrompt.mode"
-      @confirm="onPortabConfirm"
-      @cancel="passwordPrompt.open = false"
-    />
 
     <!-- 导入 / 导出结果提示 -->
     <div v-if="portabBusy || portabMsg" class="portab-toast" @click="portabMsg = ''">

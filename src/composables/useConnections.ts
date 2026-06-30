@@ -1,7 +1,7 @@
 // 已保存连接：列表、搜索过滤、分组、收藏、增删改。模块级单例，包装 storage。
 import { computed, ref } from "vue";
 import type { SavedConnection } from "../api";
-import { loadConnections, removeConnection, upsertConnection } from "../storage";
+import { loadConnections, removeConnection, saveConnections, upsertConnection } from "../storage";
 
 const UNGROUPED = "未分组";
 
@@ -10,8 +10,11 @@ export interface ConnectionGroup {
   items: SavedConnection[];
 }
 
-const connections = ref<SavedConnection[]>(loadConnections());
+const connections = ref<SavedConnection[]>([]);
 const query = ref("");
+const initialized = ref(false);
+const storageError = ref("");
+let activeMasterPassword = "";
 
 /** 按搜索词过滤（匹配 label / host / username / 分组）。 */
 const filtered = computed<SavedConnection[]>(() => {
@@ -57,25 +60,67 @@ const groupNames = computed<string[]>(() => {
   return [...set].sort((a, b) => a.localeCompare(b));
 });
 
-function save(conn: SavedConnection) {
+async function persist(password = activeMasterPassword) {
+  if (!password) throw new Error("缺少主密码，无法保存机器列表");
+  await saveConnections(connections.value, password);
+  storageError.value = "";
+}
+
+async function initConnections(masterPassword: string, resetOnFailure = false) {
+  activeMasterPassword = masterPassword;
+  try {
+    connections.value = await loadConnections(masterPassword);
+    storageError.value = "";
+  } catch (e) {
+    if (!resetOnFailure) {
+      storageError.value = e instanceof Error ? e.message : String(e);
+      throw e;
+    }
+    connections.value = [];
+    storageError.value = "";
+  }
+  initialized.value = true;
+  await persist(masterPassword);
+}
+
+async function reencryptConnections(masterPassword: string) {
+  await persist(masterPassword);
+  activeMasterPassword = masterPassword;
+}
+
+function resetConnections() {
+  connections.value = [];
+  initialized.value = false;
+  storageError.value = "";
+  activeMasterPassword = "";
+}
+
+async function save(conn: SavedConnection) {
   connections.value = upsertConnection(connections.value, conn);
+  await persist();
 }
 
-function remove(id: string) {
+async function remove(id: string) {
   connections.value = removeConnection(connections.value, id);
+  await persist();
 }
 
-function toggleFavorite(conn: SavedConnection) {
-  save({ ...conn, favorite: !conn.favorite });
+async function toggleFavorite(conn: SavedConnection) {
+  await save({ ...conn, favorite: !conn.favorite });
 }
 
 export function useConnections() {
   return {
     connections,
+    initialized,
+    storageError,
     query,
     filtered,
     grouped,
     groupNames,
+    initConnections,
+    reencryptConnections,
+    resetConnections,
     save,
     remove,
     toggleFavorite,
