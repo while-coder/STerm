@@ -187,6 +187,7 @@ function onMenuSelect(key: string) {
   background: var(--surface-2);
   color: var(--text);
   font-size: var(--fs-sm);
+  white-space: nowrap;
   cursor: pointer;
 }
 .tool-btn:hover {
@@ -196,6 +197,7 @@ function onMenuSelect(key: string) {
 .tool-icon {
   display: inline-grid;
   place-items: center;
+  flex-shrink: 0;
   width: 18px;
   height: 18px;
   border-radius: var(--radius-sm);

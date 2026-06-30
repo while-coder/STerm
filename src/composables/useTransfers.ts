@@ -122,7 +122,10 @@ function enqueue(opts: {
     sessionLabel: opts.sessionLabel,
   };
   transfers.value.push(transfer);
-  queue.push({ transfer, withProgress: opts.withProgress ?? false, start: opts.start });
+  // 取数组中的响应式代理（而非原始对象）入队，否则后续 runTask / 进度监听器
+  // 直接改原始对象属性不会触发视图更新，导致进度卡在 0%。
+  const reactiveTransfer = transfers.value[transfers.value.length - 1];
+  queue.push({ transfer: reactiveTransfer, withProgress: opts.withProgress ?? false, start: opts.start });
   pump();
   return transfer.id;
 }

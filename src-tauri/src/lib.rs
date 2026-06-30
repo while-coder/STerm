@@ -57,6 +57,7 @@ pub fn run() {
             sftp::sftp_upload,
             sftp::sftp_cancel,
             sftp::sftp_mkdir,
+            sftp::sftp_create_file,
             sftp::sftp_rename,
             sftp::sftp_remove,
             sftp::ensure_dir,

@@ -12,10 +12,13 @@ import {
   sftpDownloadDir,
   sftpUpload,
   sftpMkdir,
+  sftpCreateFile,
   sftpRename,
   sftpRemove,
   ensureDir,
   openLocalPath,
+  readTextFile,
+  writeTextFile,
   type FileEntry,
 } from "../api";
 import { useLongPress } from "../composables/useLongPress";
@@ -44,6 +47,22 @@ const loading = ref(false);
 const error = ref("");
 const homeLoaded = ref(false);
 const dragOver = ref(false);
+
+// 内置文本阅读器 / 编辑器：双击文本文件时展示其内容，可编辑并保存回远端。
+// 非文本回退系统默认程序。
+const viewer = ref<{
+  name: string;
+  remote: string; // 远端路径，保存时上传回去
+  local: string; // 本地缓存路径
+  original: string; // 原始内容，用于判断是否被修改
+  content: string; // 当前（可能已编辑的）内容
+} | null>(null);
+const viewerSaving = ref(false);
+const viewerDirty = computed(
+  () => viewer.value !== null && viewer.value.content !== viewer.value.original
+);
+// 超过此大小不走内置阅读器，直接交给系统程序，避免把大文件读进内存卡界面。
+const VIEWER_MAX_BYTES = 2 * 1024 * 1024;
 
 const { transfers, enqueue, cancel: cancelTransfer, clearFinished } = useTransfers();
 const showTransfers = computed({
@@ -125,6 +144,7 @@ const menuItems = computed<MenuItem[]>(() => {
   if (!e) {
     return [
       { key: "upload", label: "上传文件" },
+      { key: "newfile", label: "新建文件" },
       { key: "mkdir", label: "新建文件夹" },
     ];
   }
@@ -149,6 +169,7 @@ function openBlankMenu(e: MouseEvent | PointerEvent) {
 }
 function onMenuSelect(key: string) {
   if (key === "upload") return void pickUpload();
+  if (key === "newfile") return openNewFile();
   if (key === "mkdir") return openMkdir();
   const targets = menuTargets.value;
   if (!targets.length) return;
@@ -268,7 +289,7 @@ function deleteSelected() {
 
 // 输入对话框（新建文件夹 / 重命名 / 删除确认）。
 type Ask = {
-  mode: "mkdir" | "rename" | "delete";
+  mode: "mkdir" | "newfile" | "rename" | "delete";
   title: string;
   value: string;
   entry?: FileEntry;
@@ -345,14 +366,70 @@ async function openFile(entry: FileEntry) {
       withProgress: true,
       start: async (tid) => {
         await sftpDownload(props.id, entry.path, local, tid, knownFileSize(entry));
-        void openLocalPath(local).catch((e) => {
-          error.value = `打开本地文件失败：${String(e)}`;
-        });
+        await openDownloaded(entry, local);
       },
     });
   } catch (e) {
     error.value = String(e);
   }
+}
+
+// 下载完成后决定如何打开：能按 UTF-8 文本读取且不含空字节 → 内置阅读器；
+// 否则（二进制 / 非 UTF-8 / 过大 / 读取失败）回退系统默认程序。
+async function openDownloaded(entry: FileEntry, local: string) {
+  const size = knownFileSize(entry);
+  if (size === undefined || size <= VIEWER_MAX_BYTES) {
+    try {
+      const content = await readTextFile(local);
+      if (content.indexOf(String.fromCharCode(0)) === -1) {
+        viewer.value = {
+          name: entry.name,
+          remote: entry.path,
+          local,
+          original: content,
+          content,
+        };
+        return;
+      }
+    } catch {
+      /* 非文本或读取失败，走系统打开 */
+    }
+  }
+  void openLocalPath(local).catch((e) => {
+    error.value = `打开本地文件失败：${String(e)}`;
+  });
+}
+
+async function copyViewerContent() {
+  if (!viewer.value) return;
+  try {
+    await navigator.clipboard.writeText(viewer.value.content);
+  } catch {
+    /* 忽略复制失败 */
+  }
+}
+
+// 保存：先写本地缓存，再上传回远端，成功后把 original 同步为当前内容（清除“已修改”标记）。
+async function saveViewer() {
+  const v = viewer.value;
+  if (!v || viewerSaving.value || v.content === v.original) return;
+  viewerSaving.value = true;
+  try {
+    await writeTextFile(v.local, v.content);
+    await sftpUpload(props.id, v.local, v.remote, crypto.randomUUID());
+    v.original = v.content;
+    refresh();
+  } catch (e) {
+    error.value = `保存失败：${String(e)}`;
+  } finally {
+    viewerSaving.value = false;
+  }
+}
+
+// 关闭阅读器；有未保存修改时先确认，避免误丢编辑。
+function closeViewer() {
+  if (viewerDirty.value && !window.confirm("有未保存的修改，确定关闭吗？")) return;
+  viewer.value = null;
 }
 
 function goUp() {
@@ -421,6 +498,9 @@ async function pickUpload() {
 function openMkdir() {
   ask.value = { mode: "mkdir", title: "新建文件夹", value: "" };
 }
+function openNewFile() {
+  ask.value = { mode: "newfile", title: "新建文件", value: "" };
+}
 function openRename(entry: FileEntry) {
   ask.value = { mode: "rename", title: "重命名", value: entry.name, entry };
 }
@@ -436,6 +516,10 @@ async function confirmAsk() {
       const name = a.value.trim();
       if (!name) return;
       await sftpMkdir(props.id, joinRemote(cwd.value, name));
+    } else if (a.mode === "newfile") {
+      const name = a.value.trim();
+      if (!name) return;
+      await sftpCreateFile(props.id, joinRemote(cwd.value, name));
     } else if (a.mode === "rename" && a.entry) {
       const name = a.value.trim();
       if (!name || name === a.entry.name) {
@@ -493,8 +577,20 @@ onMounted(async () => {
   } catch {
     /* 移动端 / 不支持时静默 */
   }
+  window.addEventListener("keydown", onGlobalKeydown);
 });
-onBeforeUnmount(() => unlistenDrop?.());
+onBeforeUnmount(() => {
+  unlistenDrop?.();
+  window.removeEventListener("keydown", onGlobalKeydown);
+});
+
+// 阅读器打开时按 Esc 关闭（有未保存修改会经 closeViewer 二次确认）。
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape" && viewer.value) {
+    e.preventDefault();
+    closeViewer();
+  }
+}
 
 watch(
   () => props.connected,
@@ -527,6 +623,7 @@ watch(
     <div class="toolbar">
       <button class="tb" type="button" title="上级目录" @click="goUp">⬆</button>
       <button class="tb" type="button" title="刷新" @click="refresh">⟳</button>
+      <button class="tb" type="button" title="新建文件" @click="openNewFile">＋📄</button>
       <button class="tb" type="button" title="新建文件夹" @click="openMkdir">＋📁</button>
       <button class="tb" type="button" title="上传文件" @click="pickUpload">⬆ 上传</button>
       <button
@@ -692,6 +789,36 @@ watch(
         </div>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div v-if="viewer" class="viewer-backdrop" @click.self="closeViewer">
+        <div class="viewer">
+          <div class="viewer-head">
+            <span class="viewer-name" :title="viewer.remote">
+              📄 {{ viewer.name }}
+              <em v-if="viewerDirty" class="viewer-dirty">· 未保存</em>
+            </span>
+            <button type="button" @click="copyViewerContent">复制</button>
+            <button
+              type="button"
+              class="primary"
+              :disabled="!viewerDirty || viewerSaving"
+              @click="saveViewer"
+            >
+              {{ viewerSaving ? "保存中…" : "保存" }}
+            </button>
+            <button type="button" @click="closeViewer">关闭</button>
+          </div>
+          <textarea
+            v-model="viewer.content"
+            class="viewer-body"
+            spellcheck="false"
+            @keydown.ctrl.s.prevent="saveViewer"
+            @keydown.meta.s.prevent="saveViewer"
+          ></textarea>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -722,6 +849,7 @@ watch(
   background: var(--surface-3);
   color: var(--text);
   cursor: pointer;
+  white-space: nowrap;
 }
 .tb:hover {
   background: var(--surface-2);
@@ -913,6 +1041,7 @@ watch(
 .transfers-head > span {
   flex: 1;
   font-weight: 600;
+  white-space: nowrap;
 }
 .scope {
   display: inline-flex;
@@ -921,6 +1050,8 @@ watch(
   color: var(--muted);
   font-weight: 400;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .tr-session {
   font-style: normal;
@@ -934,6 +1065,8 @@ watch(
   color: var(--text);
   padding: 2px 8px;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .transfers-body {
   flex: 1;
@@ -1093,5 +1226,87 @@ watch(
 .ask-actions .primary.danger {
   background: var(--danger);
   border-color: var(--danger);
+}
+
+/* —— 内置文本阅读器 / 编辑器 —— */
+.viewer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: var(--sp-3);
+  background: var(--overlay);
+}
+.viewer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.viewer-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-sm);
+}
+.viewer-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.viewer-dirty {
+  font-style: normal;
+  font-weight: 400;
+  color: var(--accent-hover);
+}
+.viewer-head button {
+  min-height: 30px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.viewer-head .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.viewer-head button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.viewer-body {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  padding: var(--sp-3);
+  border: 0;
+  resize: none;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 4;
+}
+.viewer-body:focus {
+  outline: none;
 }
 </style>

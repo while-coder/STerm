@@ -91,6 +91,8 @@ export const sftpCancel = (transferId: string) =>
   invoke<void>("sftp_cancel", { transferId });
 export const sftpMkdir = (id: string, path: string) =>
   invoke<void>("sftp_mkdir", { id, path });
+export const sftpCreateFile = (id: string, path: string) =>
+  invoke<void>("sftp_create_file", { id, path });
 export const sftpRename = (id: string, from: string, to: string) =>
   invoke<void>("sftp_rename", { id, from, to });
 export const sftpRemove = (id: string, path: string, isDir: boolean) =>

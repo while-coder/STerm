@@ -437,6 +437,24 @@ pub async fn sftp_mkdir(
     sftp.create_dir(path).await.map_err(|e| e.to_string())
 }
 
+/// 在远端创建一个空文件；若同名文件 / 目录已存在则报错，避免覆盖。
+#[tauri::command]
+pub async fn sftp_create_file(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let entry = fetch_entry(&state, &id).await?;
+    let sftp = get_sftp(&entry).await.map_err(|e| e.to_string())?;
+    if sftp.metadata(&path).await.is_ok() {
+        return Err("同名文件或目录已存在".to_string());
+    }
+    let mut f = sftp.create(&path).await.map_err(|e| e.to_string())?;
+    f.shutdown().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn sftp_rename(
     state: State<'_, AppState>,
@@ -459,10 +477,37 @@ pub async fn sftp_remove(
     let entry = fetch_entry(&state, &id).await?;
     let sftp = get_sftp(&entry).await.map_err(|e| e.to_string())?;
     if is_dir {
-        sftp.remove_dir(path).await.map_err(|e| e.to_string())
+        remove_dir_recursive(&sftp, &path)
+            .await
+            .map_err(|e| e.to_string())
     } else {
         sftp.remove_file(path).await.map_err(|e| e.to_string())
     }
+}
+
+/// 递归删除远端目录（迭代式）：先自顶向下收集所有子目录并删除其中的文件，
+/// 再自底向上删除空目录。SFTP 的 remove_dir 只能删空目录，故必须先清空。
+async fn remove_dir_recursive(sftp: &SftpSession, root: &str) -> Result<()> {
+    // 1) 遍历整棵子树：删除遇到的文件，按发现顺序记录目录（父在前）。
+    let mut dirs: Vec<String> = vec![root.to_string()];
+    let mut stack: Vec<String> = vec![root.to_string()];
+    while let Some(dir) = stack.pop() {
+        for item in sftp.read_dir(&dir).await? {
+            let name = item.file_name();
+            let child = join_path(&dir, &name);
+            if item.metadata().is_dir() {
+                dirs.push(child.clone());
+                stack.push(child);
+            } else {
+                sftp.remove_file(child).await?;
+            }
+        }
+    }
+    // 2) 自底向上删除目录（逆序：最深的子目录先删，root 最后删）。
+    for dir in dirs.into_iter().rev() {
+        sftp.remove_dir(dir).await?;
+    }
+    Ok(())
 }
 
 /// 确保本地目录存在（递归创建），供双击查看时准备缓存目录。
