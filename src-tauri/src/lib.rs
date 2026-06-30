@@ -75,6 +75,7 @@ pub fn run() {
             gist::gist_validate,
             gist::gist_pull,
             gist::gist_push,
+            gist::gist_find,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

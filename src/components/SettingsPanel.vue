@@ -15,7 +15,6 @@ const { settings } = useSettings();
 const { changeMasterPassword } = useSecurity();
 const { syncing, lastError, syncNow, configure, disconnect } = useGistSync();
 const patInput = ref("");
-const gistIdInput = ref("");
 const syncMsg = ref("");
 const syncHelpOpen = ref(false);
 
@@ -114,9 +113,8 @@ async function onChangeMasterPassword() {
 async function onConnectSync() {
   syncMsg.value = "";
   try {
-    const login = await configure(patInput.value, gistIdInput.value);
+    const login = await configure(patInput.value);
     patInput.value = "";
-    gistIdInput.value = "";
     syncMsg.value = login ? `已连接 GitHub（${login}）并完成同步` : "已连接并完成同步";
   } catch (e) {
     syncMsg.value = e instanceof Error ? e.message : String(e);
@@ -169,7 +167,7 @@ onMounted(async () => {
 
     <section class="section">
       <div class="section-title">终端</div>
-      <label class="setting-row">
+      <div class="setting-row">
         <span>
           <strong>配色方案</strong>
           <small>终端前景 / 背景配色。</small>
@@ -177,8 +175,8 @@ onMounted(async () => {
         <select v-model="settings.termColorScheme" class="field">
           <option v-for="s in TERMINAL_SCHEMES" :key="s.key" :value="s.key">{{ s.label }}</option>
         </select>
-      </label>
-      <label class="setting-row">
+      </div>
+      <div class="setting-row">
         <span>
           <strong>字体</strong>
           <small>等宽字体，需本机已安装。</small>
@@ -186,8 +184,8 @@ onMounted(async () => {
         <select v-model="settings.termFontFamily" class="field">
           <option v-for="f in TERMINAL_FONTS" :key="f.key" :value="f.key">{{ f.label }}</option>
         </select>
-      </label>
-      <label class="setting-row">
+      </div>
+      <div class="setting-row">
         <span>
           <strong>字体大小</strong>
           <small>8 – 28 px。</small>
@@ -203,12 +201,12 @@ onMounted(async () => {
           />
           <button type="button" @click="settings.termFontSize++; clampFontSize()">＋</button>
         </span>
-      </label>
+      </div>
     </section>
 
     <section class="section">
       <div class="section-title">安全</div>
-      <label class="setting-row security-row">
+      <div class="setting-row security-row">
         <span>
           <strong>主密码</strong>
           <small>修改后会重新加密本地机器列表，并更新系统凭证。</small>
@@ -216,14 +214,14 @@ onMounted(async () => {
         <button class="change-password-btn" type="button" @click="openChangeMasterPassword">
           修改主密码
         </button>
-      </label>
+      </div>
       <p v-if="securityMsg" class="setting-msg">{{ securityMsg }}</p>
     </section>
 
     <section class="section">
       <div class="section-title">云同步</div>
       <template v-if="!settings.syncEnabled">
-        <label class="setting-row sync-row">
+        <div class="setting-row sync-row">
           <span>
             <strong class="sync-title">
               GitHub Gist 同步
@@ -231,17 +229,17 @@ onMounted(async () => {
                 class="help-btn"
                 type="button"
                 title="如何申请 GitHub PAT"
-                @click.prevent="syncHelpOpen = true"
+                @click="syncHelpOpen = true"
               >
                 ?
               </button>
             </strong>
             <small>
               用带 gist 权限的 Personal Access Token 连接。机器列表以密文上传，主密码不会上云；
-              其他设备需用同一主密码解开。
+              其他设备用同一账号连接时会自动复用同一个 Gist，无需手动填 ID，但需用同一主密码解开。
             </small>
           </span>
-        </label>
+        </div>
         <div class="sync-config">
           <input
             v-model="patInput"
@@ -249,13 +247,7 @@ onMounted(async () => {
             class="field sync-input"
             placeholder="GitHub PAT（需 gist 权限）"
             autocomplete="off"
-          />
-          <input
-            v-model="gistIdInput"
-            type="text"
-            class="field sync-input"
-            placeholder="已有 Gist ID（留空则自动创建）"
-            autocomplete="off"
+            @keyup.enter="onConnectSync"
           />
           <button class="change-password-btn" type="button" :disabled="syncing" @click="onConnectSync">
             {{ syncing ? "连接中…" : "连接并同步" }}
@@ -321,7 +313,7 @@ onMounted(async () => {
         </span>
         <input v-model="settings.sftpAutoHome" type="checkbox" :disabled="!settings.showSftp" />
       </label>
-      <label class="setting-row">
+      <div class="setting-row">
         <span>
           <strong>并行传输上限</strong>
           <small>同时进行的上传 / 下载数，其余排队。</small>
@@ -337,13 +329,13 @@ onMounted(async () => {
           />
           <button type="button" @click="settings.maxParallelTransfers++; clampParallel()">＋</button>
         </span>
-      </label>
-      <label class="setting-row cache-row">
+      </div>
+      <div class="setting-row cache-row">
         <span>
           <strong>查看缓存目录</strong>
           <small>双击查看文件时下载到此目录再用系统程序打开。</small>
         </span>
-      </label>
+      </div>
       <div class="cache-dir-control">
         <div class="cache-dir-path" :title="effectiveCacheDir">
           {{ effectiveCacheDir || "正在获取应用数据目录…" }}

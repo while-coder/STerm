@@ -3,6 +3,7 @@
 import { ref, watch } from "vue";
 import {
   deleteCredential,
+  gistFind,
   gistPull,
   gistPush,
   gistValidate,
@@ -67,9 +68,12 @@ async function syncNow(): Promise<void> {
     }
 
     // 2. 本地状态（不含私钥内容，仅路径）与远端按 id 逐条合并。
+    //    首次接入同步（从未成功同步过）时忽略本地删除墓碑：接入前的本地删除不应
+    //    压制远端已有数据，否则会误删另一台设备的连接。此时合并取并集，之后才增量删除。
+    const firstSync = settings.syncLastAt === 0;
     const localState: ConnectionsState = {
       connections: connections.value,
-      tombstones: tombstones.value,
+      tombstones: firstSync ? {} : tombstones.value,
     };
     const merged = mergeConnections(localState, remoteState);
 
@@ -110,7 +114,13 @@ async function configure(pat: string, gistId?: string): Promise<string> {
   const login = await gistValidate(token);
   await setCredential(PAT_KEY, token);
   settings.syncEnabled = true;
-  if (gistId && gistId.trim()) settings.syncGistId = gistId.trim();
+  if (gistId && gistId.trim()) {
+    settings.syncGistId = gistId.trim();
+  } else if (!settings.syncGistId) {
+    // 未手动指定时，自动复用同账号下已有的 STerm gist；找不到才在 syncNow 里新建。
+    const found = await gistFind().catch(() => null);
+    if (found) settings.syncGistId = found;
+  }
   await syncNow();
   return login;
 }

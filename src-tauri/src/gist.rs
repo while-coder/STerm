@@ -164,3 +164,46 @@ pub async fn gist_push(gist_id: Option<String>, content: String) -> Result<GistP
         version: parse_version(&v),
     })
 }
+
+/// 在当前 PAT 对应账号下查找已有的 STerm 同步 gist（含 connections.enc 文件）。
+/// 多个匹配时取最早创建的，保证多设备稳定收敛到同一个；找不到返回 None。
+#[tauri::command]
+pub async fn gist_find() -> Result<Option<String>, String> {
+    let pat = require_pat()?;
+    // 仅取第一页（每个账号的 STerm gist 通常只有一个；超过 100 个 gist 时可能漏查）。
+    let resp = with_headers(
+        client().get("https://api.github.com/gists?per_page=100"),
+        &pat,
+    )
+    .send()
+    .await
+    .map_err(net_err)?;
+    if !resp.status().is_success() {
+        return Err(status_err(resp.status()));
+    }
+    let list: serde_json::Value = resp.json().await.map_err(net_err)?;
+    let Some(arr) = list.as_array() else {
+        return Ok(None);
+    };
+
+    let mut best: Option<(&str, &str)> = None; // (created_at, id)
+    for g in arr {
+        let has_file = g
+            .get("files")
+            .and_then(|f| f.get(FILE_NAME))
+            .is_some();
+        if !has_file {
+            continue;
+        }
+        let id = g.get("id").and_then(|x| x.as_str());
+        let created = g.get("created_at").and_then(|x| x.as_str()).unwrap_or("");
+        if let Some(id) = id {
+            match best {
+                // created_at 为 ISO8601，可直接字典序比较取最早。
+                Some((c, _)) if created >= c => {}
+                _ => best = Some((created, id)),
+            }
+        }
+    }
+    Ok(best.map(|(_, id)| id.to_string()))
+}

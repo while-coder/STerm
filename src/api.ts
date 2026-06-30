@@ -89,6 +89,8 @@ export const gistPull = (gistId: string) => invoke<GistPull>("gist_pull", { gist
 /** 推送密文；gistId 为空则新建 secret gist。 */
 export const gistPush = (gistId: string | null, content: string) =>
   invoke<GistPush>("gist_push", { gistId, content });
+/** 查找当前账号下已有的 STerm 同步 gist，返回其 id（无则 null）。 */
+export const gistFind = () => invoke<string | null>("gist_find");
 
 export const sftpHome = (id: string) => invoke<string>("sftp_home", { id });
 export const sftpList = (id: string, path: string) =>
