@@ -1,4 +1,5 @@
 mod credential;
+mod gist;
 mod portab;
 mod sftp;
 mod ssh;
@@ -69,6 +70,11 @@ pub fn run() {
             credential::get_master_password,
             credential::set_master_password,
             credential::delete_master_password,
+            credential::set_credential,
+            credential::delete_credential,
+            gist::gist_validate,
+            gist::gist_pull,
+            gist::gist_push,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

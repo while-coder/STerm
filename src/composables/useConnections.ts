@@ -1,7 +1,14 @@
 // 已保存连接：列表、搜索过滤、分组、收藏、增删改。模块级单例，包装 storage。
 import { computed, ref } from "vue";
 import type { SavedConnection } from "../api";
-import { loadConnections, removeConnection, saveConnections, upsertConnection } from "../storage";
+import {
+  loadConnections,
+  removeConnection,
+  saveConnections,
+  upsertConnection,
+  type ConnectionsState,
+  type Tombstones,
+} from "../storage";
 
 const UNGROUPED = "未分组";
 
@@ -11,9 +18,12 @@ export interface ConnectionGroup {
 }
 
 const connections = ref<SavedConnection[]>([]);
+const tombstones = ref<Tombstones>({});
 const query = ref("");
 const initialized = ref(false);
 const storageError = ref("");
+// 用户主动增删改的计数器；云同步据此防抖触发推送。合并落盘不计入，避免回环。
+const changeTick = ref(0);
 let activeMasterPassword = "";
 
 /** 按搜索词过滤（匹配 label / host / username / 分组）。 */
@@ -62,14 +72,16 @@ const groupNames = computed<string[]>(() => {
 
 async function persist(password = activeMasterPassword) {
   if (!password) throw new Error("缺少主密码，无法保存机器列表");
-  await saveConnections(connections.value, password);
+  await saveConnections(connections.value, tombstones.value, password);
   storageError.value = "";
 }
 
 async function initConnections(masterPassword: string, resetOnFailure = false) {
   activeMasterPassword = masterPassword;
   try {
-    connections.value = await loadConnections(masterPassword);
+    const state = await loadConnections(masterPassword);
+    connections.value = state.connections;
+    tombstones.value = state.tombstones;
     storageError.value = "";
   } catch (e) {
     if (!resetOnFailure) {
@@ -77,6 +89,7 @@ async function initConnections(masterPassword: string, resetOnFailure = false) {
       throw e;
     }
     connections.value = [];
+    tombstones.value = {};
     storageError.value = "";
   }
   initialized.value = true;
@@ -88,21 +101,38 @@ async function reencryptConnections(masterPassword: string) {
   activeMasterPassword = masterPassword;
 }
 
+/** 用合并后的状态替换内存并落盘（供云同步调用）。 */
+async function applyMerged(state: ConnectionsState) {
+  connections.value = state.connections;
+  tombstones.value = state.tombstones;
+  await persist();
+}
+
 function resetConnections() {
   connections.value = [];
+  tombstones.value = {};
   initialized.value = false;
   storageError.value = "";
   activeMasterPassword = "";
 }
 
 async function save(conn: SavedConnection) {
-  connections.value = upsertConnection(connections.value, conn);
+  const stamped = { ...conn, updatedAt: Date.now() };
+  connections.value = upsertConnection(connections.value, stamped);
+  // 复活：保存即清除可能存在的删除墓碑。
+  if (tombstones.value[stamped.id] !== undefined) {
+    const { [stamped.id]: _, ...rest } = tombstones.value;
+    tombstones.value = rest;
+  }
   await persist();
+  changeTick.value++;
 }
 
 async function remove(id: string) {
   connections.value = removeConnection(connections.value, id);
+  tombstones.value = { ...tombstones.value, [id]: Date.now() };
   await persist();
+  changeTick.value++;
 }
 
 async function toggleFavorite(conn: SavedConnection) {
@@ -112,6 +142,8 @@ async function toggleFavorite(conn: SavedConnection) {
 export function useConnections() {
   return {
     connections,
+    tombstones,
+    changeTick,
     initialized,
     storageError,
     query,
@@ -121,6 +153,7 @@ export function useConnections() {
     initConnections,
     reencryptConnections,
     resetConnections,
+    applyMerged,
     save,
     remove,
     toggleFavorite,

@@ -5,13 +5,19 @@ import AppLayout from "./components/AppLayout.vue";
 import MasterPasswordSetup from "./components/MasterPasswordSetup.vue";
 import { useSettings } from "./composables/useSettings";
 import { useSecurity } from "./composables/useSecurity";
+import { useGistSync } from "./composables/useGistSync";
 
-const { initSettings } = useSettings();
+const { initSettings, settings } = useSettings();
 const { initialized, busy, needsSetup, error, initSecurity } = useSecurity();
+const { syncNow } = useGistSync();
 
-onMounted(() => {
+onMounted(async () => {
   initSettings();
-  void initSecurity();
+  await initSecurity();
+  // 已解锁且开启同步时，启动后拉取一次（失败只记录，不阻断使用）。
+  if (!needsSetup.value && settings.syncEnabled && settings.syncGistId) {
+    void syncNow().catch(() => undefined);
+  }
 });
 </script>
 

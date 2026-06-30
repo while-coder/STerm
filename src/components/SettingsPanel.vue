@@ -2,15 +2,42 @@
 // 设置面板：主题、终端外观、SFTP 行为。直接读写 useSettings 单例。
 import { computed, onMounted, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { openDir } from "../api";
 import { useSettings } from "../composables/useSettings";
 import { useSecurity } from "../composables/useSecurity";
+import { useGistSync } from "../composables/useGistSync";
 import { TERMINAL_FONTS, TERMINAL_SCHEMES } from "../terminalThemes";
 import BaseSheet from "./BaseSheet.vue";
 
 const { settings } = useSettings();
 const { changeMasterPassword } = useSecurity();
+const { syncing, lastError, syncNow, configure, disconnect } = useGistSync();
+const patInput = ref("");
+const gistIdInput = ref("");
+const syncMsg = ref("");
+const syncHelpOpen = ref(false);
+
+async function openTokenPage() {
+  try {
+    await openUrl("https://github.com/settings/tokens/new?scopes=gist&description=STerm");
+  } catch {
+    // 打开浏览器失败时忽略，用户可手动复制下方地址。
+  }
+}
+
+async function openGistPage() {
+  if (!settings.syncGistId) return;
+  try {
+    await openUrl(`https://gist.github.com/${settings.syncGistId}`);
+  } catch {
+    // 打开浏览器失败时忽略。
+  }
+}
+const lastSyncText = computed(() =>
+  settings.syncLastAt ? new Date(settings.syncLastAt).toLocaleString() : "尚未同步"
+);
 const changePasswordOpen = ref(false);
 const newMasterPassword = ref("");
 const confirmMasterPassword = ref("");
@@ -82,6 +109,33 @@ async function onChangeMasterPassword() {
   } finally {
     securityBusy.value = false;
   }
+}
+
+async function onConnectSync() {
+  syncMsg.value = "";
+  try {
+    const login = await configure(patInput.value, gistIdInput.value);
+    patInput.value = "";
+    gistIdInput.value = "";
+    syncMsg.value = login ? `已连接 GitHub（${login}）并完成同步` : "已连接并完成同步";
+  } catch (e) {
+    syncMsg.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function onSyncNow() {
+  syncMsg.value = "";
+  try {
+    await syncNow();
+    syncMsg.value = "同步完成";
+  } catch (e) {
+    syncMsg.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function onDisconnectSync() {
+  await disconnect();
+  syncMsg.value = "已断开同步";
 }
 
 onMounted(async () => {
@@ -164,6 +218,84 @@ onMounted(async () => {
         </button>
       </label>
       <p v-if="securityMsg" class="setting-msg">{{ securityMsg }}</p>
+    </section>
+
+    <section class="section">
+      <div class="section-title">云同步</div>
+      <template v-if="!settings.syncEnabled">
+        <label class="setting-row sync-row">
+          <span>
+            <strong class="sync-title">
+              GitHub Gist 同步
+              <button
+                class="help-btn"
+                type="button"
+                title="如何申请 GitHub PAT"
+                @click.prevent="syncHelpOpen = true"
+              >
+                ?
+              </button>
+            </strong>
+            <small>
+              用带 gist 权限的 Personal Access Token 连接。机器列表以密文上传，主密码不会上云；
+              其他设备需用同一主密码解开。
+            </small>
+          </span>
+        </label>
+        <div class="sync-config">
+          <input
+            v-model="patInput"
+            type="password"
+            class="field sync-input"
+            placeholder="GitHub PAT（需 gist 权限）"
+            autocomplete="off"
+          />
+          <input
+            v-model="gistIdInput"
+            type="text"
+            class="field sync-input"
+            placeholder="已有 Gist ID（留空则自动创建）"
+            autocomplete="off"
+          />
+          <button class="change-password-btn" type="button" :disabled="syncing" @click="onConnectSync">
+            {{ syncing ? "连接中…" : "连接并同步" }}
+          </button>
+        </div>
+      </template>
+      <template v-else>
+        <div class="sync-status">
+          <div class="sync-status-info">
+            <div class="sync-status-line">
+              <span class="sync-label">Gist</span>
+              <span class="sync-gist-id" :title="settings.syncGistId">
+                {{ settings.syncGistId || "（创建中…）" }}
+              </span>
+            </div>
+            <div class="sync-status-line">
+              <span class="sync-label">上次同步</span>
+              <span>{{ lastSyncText }}</span>
+            </div>
+          </div>
+          <div class="sync-status-actions">
+            <button
+              class="change-password-btn"
+              type="button"
+              :disabled="!settings.syncGistId"
+              title="在浏览器打开该 Gist（内容为密文）"
+              @click="openGistPage"
+            >
+              在 GitHub 查看
+            </button>
+            <button class="change-password-btn" type="button" :disabled="syncing" @click="onSyncNow">
+              {{ syncing ? "同步中…" : "立即同步" }}
+            </button>
+            <button class="change-password-btn" type="button" :disabled="syncing" @click="onDisconnectSync">
+              断开
+            </button>
+          </div>
+        </div>
+      </template>
+      <p v-if="syncMsg || lastError" class="setting-msg">{{ syncMsg || lastError }}</p>
     </section>
 
     <section class="section">
@@ -254,6 +386,29 @@ onMounted(async () => {
           </button>
         </div>
       </form>
+    </BaseSheet>
+
+    <BaseSheet
+      v-if="syncHelpOpen"
+      title="如何申请 GitHub PAT"
+      subtitle="用于授权 STerm 读写你的 Gist"
+      @close="syncHelpOpen = false"
+    >
+      <div class="help-body">
+        <ol class="help-steps">
+          <li>登录 GitHub，打开「Settings → Developer settings → Personal access tokens」。</li>
+          <li>
+            选 <strong>Tokens (classic)</strong> → Generate new token，勾选 <strong>gist</strong> 权限；
+            或用 Fine-grained token，在 Account permissions → Gists 设为 <strong>Read and write</strong>。
+          </li>
+          <li>设置过期时间后生成，<strong>复制 token（只显示一次）</strong>。</li>
+          <li>把 token 粘贴到「GitHub PAT」输入框，点「连接并同步」。Gist ID 留空会自动创建。</li>
+        </ol>
+        <p class="help-hint">下方按钮会打开已预选 gist 权限的令牌创建页：</p>
+        <button class="primary help-open-btn" type="button" @click="openTokenPage">
+          打开 GitHub 令牌页
+        </button>
+      </div>
     </BaseSheet>
   </div>
 </template>
@@ -418,6 +573,120 @@ onMounted(async () => {
 }
 .change-password-btn:hover {
   border-color: var(--accent);
+}
+.change-password-btn:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+.sync-row {
+  min-height: 0;
+  padding-bottom: var(--sp-2);
+}
+.sync-config {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-2);
+}
+.sync-input {
+  width: 100%;
+  min-height: var(--hit);
+}
+.sync-status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-2);
+}
+.sync-status-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: var(--fs-sm);
+}
+.sync-status-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.sync-label {
+  flex: 0 0 64px;
+  color: var(--muted);
+}
+.sync-gist-id {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono, monospace);
+  color: var(--text);
+}
+.sync-status-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.sync-status-actions button {
+  white-space: nowrap;
+}
+.sync-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.help-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.help-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.help-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.help-steps {
+  margin: 0;
+  padding-left: 1.2em;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+.help-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.help-open-btn {
+  min-height: var(--hit);
+  padding: 0 var(--sp-4);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+.help-open-btn:hover {
+  background: var(--accent-hover);
 }
 .setting-msg {
   margin: 0;

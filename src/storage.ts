@@ -30,6 +30,12 @@ export interface AppSettings {
   maxParallelTransfers: number;
   /** 双击查看时的本地缓存目录；空表示用应用数据目录下的默认缓存。 */
   sftpCacheDir: string;
+  /** 是否启用机器列表云同步（GitHub Gist）。 */
+  syncEnabled: boolean;
+  /** 同步使用的 Gist id；空表示尚未创建。 */
+  syncGistId: string;
+  /** 上次成功同步的毫秒时间戳；0 表示从未同步。 */
+  syncLastAt: number;
 }
 
 const CONNECTIONS_KEY = "sterm.connections";
@@ -49,10 +55,23 @@ const DEFAULT_SETTINGS: AppSettings = {
   termFontFamily: "Consolas, 'Courier New', monospace",
   maxParallelTransfers: 2,
   sftpCacheDir: "",
+  syncEnabled: false,
+  syncGistId: "",
+  syncLastAt: 0,
 };
+
+/** 墓碑：已删除连接的 id → 删除时的毫秒时间戳，用于把删除同步到其他设备。 */
+export type Tombstones = Record<string, number>;
+
+/** 机器列表的完整状态：现存连接 + 已删除墓碑。 */
+export interface ConnectionsState {
+  connections: SavedConnection[];
+  tombstones: Tombstones;
+}
 
 interface ConnectionsStorePayload {
   connections: SavedConnection[];
+  tombstones?: Tombstones;
 }
 
 function isEncryptedStore(value: unknown): value is EncryptedEnvelope {
@@ -64,10 +83,10 @@ function isEncryptedStore(value: unknown): value is EncryptedEnvelope {
   );
 }
 
-export async function loadConnections(masterPassword: string): Promise<SavedConnection[]> {
+export async function loadConnections(masterPassword: string): Promise<ConnectionsState> {
   try {
     const raw = localStorage.getItem(CONNECTIONS_KEY);
-    if (!raw) return [];
+    if (!raw) return { connections: [], tombstones: {} };
     const parsed = JSON.parse(raw);
     if (isEncryptedStore(parsed)) {
       const payload = await decryptJson<ConnectionsStorePayload>(
@@ -75,17 +94,27 @@ export async function loadConnections(masterPassword: string): Promise<SavedConn
         masterPassword,
         "connections-store"
       );
-      return Array.isArray(payload?.connections) ? payload.connections : [];
+      return {
+        connections: Array.isArray(payload?.connections) ? payload.connections : [],
+        tombstones:
+          payload?.tombstones && typeof payload.tombstones === "object"
+            ? payload.tombstones
+            : {},
+      };
     }
-    return [];
+    return { connections: [], tombstones: {} };
   } catch {
     throw new Error("机器列表读取失败：主密码错误或本地数据已损坏");
   }
 }
 
-export async function saveConnections(list: SavedConnection[], masterPassword: string): Promise<void> {
+export async function saveConnections(
+  list: SavedConnection[],
+  tombstones: Tombstones,
+  masterPassword: string
+): Promise<void> {
   if (!masterPassword) throw new Error("缺少主密码，无法保存机器列表");
-  const payload: ConnectionsStorePayload = { connections: list };
+  const payload: ConnectionsStorePayload = { connections: list, tombstones };
   const text = await encryptJson(payload, masterPassword, "connections-store");
   localStorage.setItem(CONNECTIONS_KEY, text);
 }

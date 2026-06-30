@@ -31,6 +31,8 @@ export interface SavedConnection {
   group?: string;
   /** 收藏置顶。 */
   favorite?: boolean;
+  /** 最近一次修改的毫秒时间戳，用于多设备同步时按 id 取最新。 */
+  updatedAt?: number;
 }
 
 export interface FileEntry {
@@ -64,6 +66,29 @@ export const getMasterPassword = () => invoke<string | null>("get_master_passwor
 export const setMasterPassword = (password: string) =>
   invoke<void>("set_master_password", { password });
 export const deleteMasterPassword = () => invoke<void>("delete_master_password");
+
+// —— 系统凭证中的通用秘密（如 GitHub PAT）。出于安全不提供读回前端的接口。 ——
+export const setCredential = (key: string, value: string) =>
+  invoke<void>("set_credential", { key, value });
+export const deleteCredential = (key: string) => invoke<void>("delete_credential", { key });
+
+// —— GitHub Gist 同步：后端只搬运密文，PAT 从系统凭证库内部读取。 ——
+export interface GistPull {
+  /** connections.enc 文件内容；gist 中无该文件时为 null。 */
+  content: string | null;
+  /** 最近一次提交的 version。 */
+  version: string | null;
+}
+export interface GistPush {
+  gistId: string;
+  version: string | null;
+}
+/** 验证 PAT，返回 GitHub 用户名。 */
+export const gistValidate = (pat: string) => invoke<string>("gist_validate", { pat });
+export const gistPull = (gistId: string) => invoke<GistPull>("gist_pull", { gistId });
+/** 推送密文；gistId 为空则新建 secret gist。 */
+export const gistPush = (gistId: string | null, content: string) =>
+  invoke<GistPush>("gist_push", { gistId, content });
 
 export const sftpHome = (id: string) => invoke<string>("sftp_home", { id });
 export const sftpList = (id: string, path: string) =>

@@ -1,11 +1,35 @@
-// 系统凭证中的主密码读写：
-// - Windows: Credential Manager
-// - macOS: Keychain（security 命令）
-// - Linux: Secret Service（secret-tool/libsecret）
+// 系统凭证读写：按 key 存取一条秘密（主密码、GitHub PAT 等）。
+// - Windows: Credential Manager（target = "STerm:<key>"）
+// - macOS: Keychain（security 命令，service = "STerm:<key>"）
+// - Linux: Secret Service（secret-tool/libsecret，service = "STerm", account = <key>）
+
+const MASTER_PASSWORD_KEY: &str = "master-password";
+
+/// 供其他后端模块（如 gist）按 key 读取秘密，不经过前端。
+pub(crate) fn read_credential(key: &str) -> Result<Option<String>, String> {
+    platform::get(key)
+}
+
+// —— 通用按 key 读写（出于安全考虑不提供读回前端的命令，仅写入/删除）——
+
+#[tauri::command]
+pub fn set_credential(key: String, value: String) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("凭证内容不能为空".to_string());
+    }
+    platform::set(&key, value)
+}
+
+#[tauri::command]
+pub fn delete_credential(key: String) -> Result<(), String> {
+    platform::delete(&key)
+}
+
+// —— 主密码（保持原有前端 API 不变，内部转调通用实现）——
 
 #[tauri::command]
 pub fn get_master_password() -> Result<Option<String>, String> {
-    platform::get_master_password()
+    platform::get(MASTER_PASSWORD_KEY)
 }
 
 #[tauri::command]
@@ -13,12 +37,12 @@ pub fn set_master_password(password: String) -> Result<(), String> {
     if password.is_empty() {
         return Err("主密码不能为空".to_string());
     }
-    platform::set_master_password(password)
+    platform::set(MASTER_PASSWORD_KEY, password)
 }
 
 #[tauri::command]
 pub fn delete_master_password() -> Result<(), String> {
-    platform::delete_master_password()
+    platform::delete(MASTER_PASSWORD_KEY)
 }
 
 #[cfg(target_os = "windows")]
@@ -31,8 +55,11 @@ mod platform {
         CRED_TYPE_GENERIC,
     };
 
-    const TARGET_NAME: &str = "STerm:master-password";
     const USER_NAME: &str = "STerm";
+
+    fn target_name(key: &str) -> String {
+        format!("STerm:{key}")
+    }
 
     fn wide_null(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -44,8 +71,8 @@ mod platform {
         })
     }
 
-    pub fn get_master_password() -> Result<Option<String>, String> {
-        let target = wide_null(TARGET_NAME);
+    pub fn get(key: &str) -> Result<Option<String>, String> {
+        let target = wide_null(&target_name(key));
         let mut credential: *mut CREDENTIALW = null_mut();
         let ok = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
 
@@ -80,10 +107,10 @@ mod platform {
             .map_err(|_| "系统凭证内容不是有效的 UTF-8".to_string())
     }
 
-    pub fn set_master_password(password: String) -> Result<(), String> {
-        let target = wide_null(TARGET_NAME);
+    pub fn set(key: &str, value: String) -> Result<(), String> {
+        let target = wide_null(&target_name(key));
         let username = wide_null(USER_NAME);
-        let mut blob = password.into_bytes();
+        let mut blob = value.into_bytes();
         let mut credential = unsafe { std::mem::zeroed::<CREDENTIALW>() };
 
         credential.Type = CRED_TYPE_GENERIC;
@@ -100,8 +127,8 @@ mod platform {
         Ok(())
     }
 
-    pub fn delete_master_password() -> Result<(), String> {
-        let target = wide_null(TARGET_NAME);
+    pub fn delete(key: &str) -> Result<(), String> {
+        let target = wide_null(&target_name(key));
         let ok = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
         if ok == 0 {
             let err = unsafe { GetLastError() };
@@ -118,8 +145,11 @@ mod platform {
 mod platform {
     use std::process::Command;
 
-    const SERVICE: &str = "STerm:master-password";
     const ACCOUNT: &str = "STerm";
+
+    fn service(key: &str) -> String {
+        format!("STerm:{key}")
+    }
 
     fn strip_trailing_newline(mut s: String) -> String {
         while s.ends_with('\n') || s.ends_with('\r') {
@@ -137,9 +167,9 @@ mod platform {
             || stderr.contains("The specified item could not be found")
     }
 
-    pub fn get_master_password() -> Result<Option<String>, String> {
+    pub fn get(key: &str) -> Result<Option<String>, String> {
         let output = Command::new("security")
-            .args(["find-generic-password", "-a", ACCOUNT, "-s", SERVICE, "-w"])
+            .args(["find-generic-password", "-a", ACCOUNT, "-s", &service(key), "-w"])
             .output()
             .map_err(|e| format!("读取 Keychain 失败：{e}"))?;
         if output.status.success() {
@@ -152,16 +182,16 @@ mod platform {
         Err(format!("读取 Keychain 失败：{stderr}"))
     }
 
-    pub fn set_master_password(password: String) -> Result<(), String> {
+    pub fn set(key: &str, value: String) -> Result<(), String> {
         let output = Command::new("security")
             .args([
                 "add-generic-password",
                 "-a",
                 ACCOUNT,
                 "-s",
-                SERVICE,
+                &service(key),
                 "-w",
-                password.as_str(),
+                value.as_str(),
                 "-U",
             ])
             .output()
@@ -169,15 +199,12 @@ mod platform {
         if output.status.success() {
             return Ok(());
         }
-        Err(format!(
-            "保存 Keychain 失败：{}",
-            output_text(output.stderr)
-        ))
+        Err(format!("保存 Keychain 失败：{}", output_text(output.stderr)))
     }
 
-    pub fn delete_master_password() -> Result<(), String> {
+    pub fn delete(key: &str) -> Result<(), String> {
         let output = Command::new("security")
-            .args(["delete-generic-password", "-a", ACCOUNT, "-s", SERVICE])
+            .args(["delete-generic-password", "-a", ACCOUNT, "-s", &service(key)])
             .output()
             .map_err(|e| format!("删除 Keychain 凭证失败：{e}"))?;
         if output.status.success() {
@@ -197,8 +224,6 @@ mod platform {
     use std::process::{Command, Stdio};
 
     const SERVICE: &str = "STerm";
-    const ACCOUNT: &str = "master-password";
-    const LABEL: &str = "STerm Master Password";
 
     fn strip_trailing_newline(mut s: String) -> String {
         while s.ends_with('\n') || s.ends_with('\r') {
@@ -222,8 +247,8 @@ mod platform {
             .map_err(|e| format!("{}：{e}", secret_tool_hint()))
     }
 
-    pub fn get_master_password() -> Result<Option<String>, String> {
-        let output = run_secret_tool(&["lookup", "service", SERVICE, "account", ACCOUNT])?;
+    pub fn get(key: &str) -> Result<Option<String>, String> {
+        let output = run_secret_tool(&["lookup", "service", SERVICE, "account", key])?;
         if output.status.success() {
             let secret = strip_trailing_newline(output_text(output.stdout));
             return if secret.is_empty() {
@@ -239,10 +264,11 @@ mod platform {
         Err(format!("读取 Secret Service 凭证失败：{stderr}"))
     }
 
-    pub fn set_master_password(password: String) -> Result<(), String> {
+    pub fn set(key: &str, value: String) -> Result<(), String> {
+        let label = format!("STerm {key}");
         let mut child = Command::new("secret-tool")
             .args([
-                "store", "--label", LABEL, "service", SERVICE, "account", ACCOUNT,
+                "store", "--label", &label, "service", SERVICE, "account", key,
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -256,7 +282,7 @@ mod platform {
                 .as_mut()
                 .ok_or_else(|| "写入 Secret Service 凭证失败：无法打开 stdin".to_string())?;
             stdin
-                .write_all(password.as_bytes())
+                .write_all(value.as_bytes())
                 .map_err(|e| format!("写入 Secret Service 凭证失败：{e}"))?;
         }
 
@@ -272,8 +298,8 @@ mod platform {
         ))
     }
 
-    pub fn delete_master_password() -> Result<(), String> {
-        let output = run_secret_tool(&["clear", "service", SERVICE, "account", ACCOUNT])?;
+    pub fn delete(key: &str) -> Result<(), String> {
+        let output = run_secret_tool(&["clear", "service", SERVICE, "account", key])?;
         if output.status.success() {
             return Ok(());
         }
@@ -287,15 +313,15 @@ mod platform {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 mod platform {
-    pub fn get_master_password() -> Result<Option<String>, String> {
+    pub fn get(_key: &str) -> Result<Option<String>, String> {
         Err("当前平台暂未支持系统凭证".to_string())
     }
 
-    pub fn set_master_password(_password: String) -> Result<(), String> {
+    pub fn set(_key: &str, _value: String) -> Result<(), String> {
         Err("当前平台暂未支持系统凭证".to_string())
     }
 
-    pub fn delete_master_password() -> Result<(), String> {
+    pub fn delete(_key: &str) -> Result<(), String> {
         Err("当前平台暂未支持系统凭证".to_string())
     }
 }

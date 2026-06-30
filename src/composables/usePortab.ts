@@ -1,12 +1,7 @@
 // 机器列表导入 / 导出：导出时嵌入私钥内容并口令加密，导入时解密、回写私钥、合并到列表。
-import {
-  importPrivateKey,
-  readTextFile,
-  writeTextFile,
-  type ExportedConnection,
-  type SavedConnection,
-} from "../api";
+import { readTextFile, writeTextFile, type ExportedConnection } from "../api";
 import { decryptJson, encryptJson } from "../crypto";
+import { embedPrivateKeys, restorePrivateKey } from "./connKeys";
 import { useConnections } from "./useConnections";
 import { useSecurity } from "./useSecurity";
 
@@ -26,21 +21,7 @@ export function usePortab() {
   /** 导出全部连接到指定文件：嵌入私钥内容、口令加密。 */
   async function exportConnections(savePath: string): Promise<PortabResult> {
     const password = requireMasterPassword();
-    const warnings: string[] = [];
-    const items: ExportedConnection[] = [];
-
-    for (const c of connections.value) {
-      const entry: ExportedConnection = { ...c };
-      if (c.auth === "key" && c.privateKeyPath) {
-        try {
-          entry.privateKey = await readTextFile(c.privateKeyPath);
-        } catch (e) {
-          warnings.push(`「${c.label}」私钥读取失败，已跳过私钥内容：${String(e)}`);
-        }
-      }
-      items.push(entry);
-    }
-
+    const { items, warnings } = await embedPrivateKeys(connections.value);
     const payload: ExportPayload = { connections: items };
     const text = await encryptJson(payload, password, "connections-export");
     await writeTextFile(savePath, text);
@@ -59,15 +40,8 @@ export function usePortab() {
 
     let count = 0;
     for (const item of list) {
-      const { privateKey, ...rest } = item;
-      const conn: SavedConnection = { ...rest };
-      if (privateKey && conn.auth === "key") {
-        try {
-          conn.privateKeyPath = await importPrivateKey(conn.id, privateKey);
-        } catch (e) {
-          warnings.push(`「${conn.label}」私钥写入失败，请手动指定私钥路径：${String(e)}`);
-        }
-      }
+      const { conn, warning } = await restorePrivateKey(item);
+      if (warning) warnings.push(warning);
       await save(conn);
       count++;
     }
