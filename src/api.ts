@@ -77,3 +77,4 @@ export const sftpRename = (id: string, from: string, to: string) =>
   invoke<void>("sftp_rename", { id, from, to });
 export const sftpRemove = (id: string, path: string, isDir: boolean) =>
   invoke<void>("sftp_remove", { id, path, isDir });
+export const ensureDir = (path: string) => invoke<void>("ensure_dir", { path });

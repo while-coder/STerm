@@ -14,6 +14,10 @@ export interface AppSettings {
   sidebarWidth: number;
   /** SFTP 面板宽度（桌面，px）。 */
   sftpPanelWidth: number;
+  /** 传输列表面板高度（px）。 */
+  transferListHeight: number;
+  /** 传输列表面板是否展开。 */
+  transferListOpen: boolean;
   /** 终端配色方案 key（见 terminalThemes，"auto" 跟随界面主题）。 */
   termColorScheme: string;
   /** 终端字号（px）。 */
@@ -22,6 +26,8 @@ export interface AppSettings {
   termFontFamily: string;
   /** 并行传输上限（同时进行的上传 / 下载数）。 */
   maxParallelTransfers: number;
+  /** 双击查看时的本地缓存目录；空表示用应用数据目录下的默认缓存。 */
+  sftpCacheDir: string;
 }
 
 const CONNECTIONS_KEY = "sterm.connections";
@@ -34,10 +40,13 @@ const DEFAULT_SETTINGS: AppSettings = {
   sidebarCollapsed: false,
   sidebarWidth: 264,
   sftpPanelWidth: 340,
+  transferListHeight: 180,
+  transferListOpen: false,
   termColorScheme: "auto",
   termFontSize: 14,
   termFontFamily: "Consolas, 'Courier New', monospace",
   maxParallelTransfers: 2,
+  sftpCacheDir: "",
 };
 
 export function loadConnections(): SavedConnection[] {

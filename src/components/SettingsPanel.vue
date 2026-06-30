@@ -1,5 +1,6 @@
 <script setup lang="ts">
 // 设置面板：主题、终端外观、SFTP 行为。直接读写 useSettings 单例。
+import { open } from "@tauri-apps/plugin-dialog";
 import { useSettings } from "../composables/useSettings";
 import { TERMINAL_FONTS, TERMINAL_SCHEMES } from "../terminalThemes";
 
@@ -10,6 +11,11 @@ function clampFontSize() {
 }
 function clampParallel() {
   settings.maxParallelTransfers = Math.min(8, Math.max(1, Math.round(settings.maxParallelTransfers) || 1));
+}
+// 选择双击查看时的本地缓存目录。
+async function pickCacheDir() {
+  const dir = await open({ directory: true });
+  if (dir && typeof dir === "string") settings.sftpCacheDir = dir;
 }
 </script>
 
@@ -110,6 +116,16 @@ function clampParallel() {
             @change="clampParallel"
           />
           <button type="button" @click="settings.maxParallelTransfers++; clampParallel()">＋</button>
+        </span>
+      </label>
+      <label class="setting-row">
+        <span>
+          <strong>查看缓存目录</strong>
+          <small>双击查看文件时下载到此目录再用系统程序打开，留空使用应用数据目录。</small>
+        </span>
+        <span class="path-pick">
+          <input v-model="settings.sftpCacheDir" placeholder="（应用数据目录）" />
+          <button type="button" @click="pickCacheDir">选择</button>
         </span>
       </label>
     </section>
@@ -219,5 +235,31 @@ function clampParallel() {
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   color: var(--text);
+}
+.path-pick {
+  flex-direction: row !important;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.path-pick input {
+  width: 180px;
+  min-height: 32px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.path-pick button {
+  min-height: 32px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+  cursor: pointer;
+}
+.path-pick button:hover {
+  border-color: var(--accent);
 }
 </style>

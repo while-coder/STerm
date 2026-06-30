@@ -381,3 +381,11 @@ pub async fn sftp_remove(
         sftp.remove_file(path).await.map_err(|e| e.to_string())
     }
 }
+
+/// 确保本地目录存在（递归创建），供双击查看时准备缓存目录。
+#[tauri::command]
+pub async fn ensure_dir(path: String) -> Result<(), String> {
+    tokio::fs::create_dir_all(&path)
+        .await
+        .map_err(|e| e.to_string())
+}

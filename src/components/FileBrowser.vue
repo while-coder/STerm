@@ -3,6 +3,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { appDataDir, join } from "@tauri-apps/api/path";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   sftpHome,
@@ -13,11 +15,15 @@ import {
   sftpMkdir,
   sftpRename,
   sftpRemove,
+  ensureDir,
   type FileEntry,
 } from "../api";
 import { useLongPress } from "../composables/useLongPress";
 import { useTransfers } from "../composables/useTransfers";
+import { useSettings } from "../composables/useSettings";
 import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
+
+const { settings } = useSettings();
 
 const props = defineProps<{
   id: string;
@@ -40,7 +46,12 @@ const homeLoaded = ref(false);
 const dragOver = ref(false);
 
 const { transfers, enqueue, cancel: cancelTransfer, clearFinished } = useTransfers();
-const showTransfers = ref(false);
+const showTransfers = computed({
+  get: () => settings.transferListOpen,
+  set: (v: boolean) => {
+    settings.transferListOpen = v;
+  },
+});
 const onlyCurrentSession = ref(true);
 const activeCount = computed(
   () => transfers.value.filter((t) => t.status === "queued" || t.status === "running").length
@@ -66,6 +77,26 @@ function transferPercent(t: { transferred: number; total: number; status: string
   return Math.min(100, Math.round((t.transferred / t.total) * 100));
 }
 
+// —— 传输列表高度拖拽（拖顶边，向上变高）——
+function startResizeTransfers(e: PointerEvent) {
+  const startY = e.clientY;
+  const startH = settings.transferListHeight;
+  // 上限随容器高度动态计算，留出 56px 顶部边距，避免拖出屏幕。
+  const panel = (e.currentTarget as HTMLElement).parentElement;
+  const container = panel?.offsetParent as HTMLElement | null;
+  const maxH = container ? Math.max(120, container.clientHeight - 140) : 520;
+  const move = (ev: PointerEvent) => {
+    const h = startH + (startY - ev.clientY);
+    settings.transferListHeight = Math.min(maxH, Math.max(120, h));
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
 // 右键 / 长按上下文菜单。entry 为空时是空白区菜单（上传 / 新建文件夹）。
 const lp = useLongPress();
 const lpBlank = useLongPress();
@@ -75,6 +106,15 @@ const menu = ref<{ open: boolean; x: number; y: number; entry: FileEntry | null 
   y: 0,
   entry: null,
 });
+// 菜单作用对象：右键项若在多选区内，则作用于整个选区，否则仅该项。
+const menuTargets = computed<FileEntry[]>(() => {
+  const e = menu.value.entry;
+  if (!e) return [];
+  if (selected.value.has(e.path) && selected.value.size > 1) {
+    return entries.value.filter((x) => selected.value.has(x.path));
+  }
+  return [e];
+});
 const menuItems = computed<MenuItem[]>(() => {
   const e = menu.value.entry;
   if (!e) {
@@ -83,11 +123,18 @@ const menuItems = computed<MenuItem[]>(() => {
       { key: "mkdir", label: "新建文件夹" },
     ];
   }
-  const items: MenuItem[] = [];
-  items.push({ key: "download", label: e.isDir ? "下载文件夹" : "下载" });
-  items.push({ key: "rename", label: "重命名" });
-  items.push({ key: "delete", label: "删除", danger: true });
-  return items;
+  const n = menuTargets.value.length;
+  if (n > 1) {
+    return [
+      { key: "download", label: `下载 ${n} 项` },
+      { key: "delete", label: `删除 ${n} 项`, danger: true },
+    ];
+  }
+  return [
+    { key: "download", label: e.isDir ? "下载文件夹" : "下载" },
+    { key: "rename", label: "重命名" },
+    { key: "delete", label: "删除", danger: true },
+  ];
 });
 function openMenuAt(e: MouseEvent | PointerEvent, entry: FileEntry) {
   menu.value = { open: true, x: e.clientX, y: e.clientY, entry };
@@ -98,8 +145,14 @@ function openBlankMenu(e: MouseEvent | PointerEvent) {
 function onMenuSelect(key: string) {
   if (key === "upload") return void pickUpload();
   if (key === "mkdir") return openMkdir();
-  const entry = menu.value.entry;
-  if (!entry) return;
+  const targets = menuTargets.value;
+  if (!targets.length) return;
+  if (targets.length > 1) {
+    if (key === "download") void downloadItems(targets);
+    else if (key === "delete") askDeleteItems(targets);
+    return;
+  }
+  const entry = targets[0];
   if (key === "download") void (entry.isDir ? downloadDir(entry) : download(entry));
   else if (key === "rename") openRename(entry);
   else if (key === "delete") openDelete(entry);
@@ -173,8 +226,7 @@ function joinLocal(dir: string, name: string): string {
   const sep = dir.includes("\\") ? "\\" : "/";
   return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
 }
-async function downloadSelected() {
-  const items = entries.value.filter((e) => selected.value.has(e.path));
+async function downloadItems(items: FileEntry[]) {
   if (!items.length) return;
   const dir = await open({ directory: true });
   if (!dir || typeof dir !== "string") return;
@@ -192,9 +244,26 @@ async function downloadSelected() {
   }
   clearSelection();
 }
+function downloadSelected() {
+  void downloadItems(entries.value.filter((e) => selected.value.has(e.path)));
+}
+
+function askDeleteItems(items: FileEntry[]) {
+  if (!items.length) return;
+  ask.value = { mode: "delete", title: `删除选中的 ${items.length} 项？`, value: "", entries: items };
+}
+function deleteSelected() {
+  askDeleteItems(entries.value.filter((e) => selected.value.has(e.path)));
+}
 
 // 输入对话框（新建文件夹 / 重命名 / 删除确认）。
-type Ask = { mode: "mkdir" | "rename" | "delete"; title: string; value: string; entry?: FileEntry };
+type Ask = {
+  mode: "mkdir" | "rename" | "delete";
+  title: string;
+  value: string;
+  entry?: FileEntry;
+  entries?: FileEntry[];
+};
 const ask = ref<Ask | null>(null);
 
 const crumbs = computed(() => {
@@ -246,6 +315,32 @@ function joinRemote(dir: string, name: string): string {
 
 function enter(entry: FileEntry) {
   if (entry.isDir) void listPath(entry.path);
+}
+
+// 双击查看：下载到本地缓存目录后用系统默认程序打开。
+async function cacheBaseDir(): Promise<string> {
+  const custom = settings.sftpCacheDir?.trim();
+  if (custom) return custom;
+  return join(await appDataDir(), "viewer-cache");
+}
+async function openFile(entry: FileEntry) {
+  if (entry.isDir) return;
+  try {
+    const base = await cacheBaseDir();
+    await ensureDir(base);
+    const local = await join(base, entry.name);
+    startTransfer({
+      kind: "download",
+      name: entry.name,
+      withProgress: true,
+      start: async (tid) => {
+        await sftpDownload(props.id, entry.path, local, tid);
+        await openPath(local);
+      },
+    });
+  } catch (e) {
+    error.value = String(e);
+  }
 }
 
 function goUp() {
@@ -336,8 +431,22 @@ async function confirmAsk() {
         return;
       }
       await sftpRename(props.id, a.entry.path, joinRemote(parentOf(a.entry.path), name));
-    } else if (a.mode === "delete" && a.entry) {
-      await sftpRemove(props.id, a.entry.path, a.entry.isDir);
+    } else if (a.mode === "delete") {
+      // 批量删除：逐项删除，单项失败不中断其余，最后汇总错误。
+      const items = a.entries ?? (a.entry ? [a.entry] : []);
+      const errs: string[] = [];
+      for (const it of items) {
+        try {
+          await sftpRemove(props.id, it.path, it.isDir);
+        } catch (e) {
+          errs.push(`${it.name}: ${e}`);
+        }
+      }
+      clearSelection();
+      ask.value = null;
+      refresh();
+      if (errs.length) error.value = errs.join("；");
+      return;
     }
     ask.value = null;
     refresh();
@@ -435,6 +544,7 @@ watch(
     <div v-if="selected.size" class="selbar">
       <span>已选 {{ selected.size }} 项</span>
       <button type="button" class="primary" @click="downloadSelected">下载</button>
+      <button type="button" class="danger" @click="deleteSelected">删除</button>
       <button type="button" @click="clearSelection">清除</button>
     </div>
 
@@ -458,6 +568,7 @@ watch(
           class="name"
           type="button"
           @click="onNameClick(e, $event)"
+          @dblclick="openFile(e)"
           @pointerdown="lp.start($event, (ev) => openMenuAt(ev, e))"
           @pointermove="lp.move"
           @pointerup="lp.end"
@@ -486,7 +597,12 @@ watch(
       }"
     ></div>
 
-    <div v-if="showTransfers" class="transfers">
+    <div v-if="showTransfers" class="transfers" :style="{ height: settings.transferListHeight + 'px' }">
+      <div
+        class="transfers-resizer"
+        title="拖拽调整传输列表高度"
+        @pointerdown.prevent="startResizeTransfers"
+      ></div>
       <div class="transfers-head">
         <span>传输列表</span>
         <label class="scope">
@@ -574,6 +690,7 @@ watch(
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
   background: var(--surface);
   color: var(--text);
   font-size: var(--fs-sm);
@@ -671,6 +788,11 @@ watch(
   background: var(--accent);
   color: #fff;
 }
+.selbar button.danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+}
 .marquee {
   position: fixed;
   z-index: 60;
@@ -740,17 +862,33 @@ watch(
   font-size: var(--fs-xs);
 }
 .transfers {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 20;
-  max-height: 60%;
+  flex: 0 0 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--line);
   background: var(--bg);
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
+}
+.transfers-resizer {
+  flex: 0 0 auto;
+  height: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+  touch-action: none;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.transfers-resizer::before {
+  content: "";
+  width: 36px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--line);
+}
+.transfers-resizer:hover::before {
+  background: var(--muted);
 }
 .transfers-head {
   display: flex;
@@ -786,6 +924,8 @@ watch(
   cursor: pointer;
 }
 .transfers-body {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   padding: var(--sp-2);
 }
