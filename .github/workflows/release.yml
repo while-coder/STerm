@@ -120,6 +120,8 @@ jobs:
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
 
   # Android：CI 内 init → 注入签名（可选）→ build APK → 上传到 release。
@@ -257,3 +259,48 @@ jobs:
           DEST="STerm_${TAG#v}.ipa"
           cp "$IPA" "$DEST"
           gh release upload "$TAG" "$DEST" -R "${{ github.repository }}" --clobber
+
+  # 把桌面构建生成的 latest.json 同步到固定的 "updater" release，
+  # 即 tauri.conf.json 中 updater endpoint 指向的地址。
+  publish-manifest:
+    needs: desktop
+    if: ${{ !cancelled() && needs.desktop.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Force release body from CHANGELOG
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          VERSION="${TAG#v}"
+          BODY=$(awk -v v="$VERSION" '
+            $1 == "##" && $2 == v { capture=1; next }
+            capture && $1 == "##" { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          [ -z "$BODY" ] && BODY="Release $VERSION"
+          # tauri-action only sets the body when first creating the release; if an earlier
+          # run already created the draft, its body is stuck on whatever was there. Force it.
+          gh release edit "$TAG" -R "$REPO" --notes "$BODY"
+
+      - name: Sync updater manifest to updater channel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release download "$TAG" -R "$REPO" -p "latest.json" -O latest.json; then
+            echo "::error::latest.json not found on release $TAG — no platform produced an updater manifest"
+            exit 1
+          fi
+          gh release view updater -R "$REPO" >/dev/null 2>&1 || \
+            gh release create updater -R "$REPO" \
+              --title "Updater Manifests" \
+              --notes "Auto-maintained by CI. Hosts the updater JSON for STerm." \
+              --latest=false
+          gh release upload updater latest.json -R "$REPO" --clobber
