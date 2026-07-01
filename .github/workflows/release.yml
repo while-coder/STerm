@@ -20,14 +20,14 @@ jobs:
       - id: detect
         env:
           IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
-          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
           if [ -n "$IOS_CERTIFICATE" ]; then
             echo "ios=true" >> "$GITHUB_OUTPUT"
           else
             echo "ios=false" >> "$GITHUB_OUTPUT"
           fi
-          if [ -n "$ANDROID_KEY_BASE64" ]; then
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
             echo "android_signed=true" >> "$GITHUB_OUTPUT"
           else
             echo "android_signed=false" >> "$GITHUB_OUTPUT"
@@ -80,8 +80,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: ${{ matrix.platform }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ matrix.platform }}-${{ matrix.rust-target || 'default' }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
+            ${{ matrix.platform }}-${{ matrix.rust-target || 'default' }}-cargo-
             ${{ matrix.platform }}-cargo-
 
       - name: Install Linux deps
@@ -118,16 +119,16 @@ jobs:
           tagName: v__VERSION__
           releaseName: 'STerm v__VERSION__'
           releaseBody: ${{ steps.notes.outputs.body }}
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
 
-  # Android：CI 内 init → 注入签名（可选）→ build APK → 上传到 release。
+  # Android：gen/android 已随仓库提交（含定制签名的 build.gradle.kts），
+  # CI 解码 keystore → 经环境变量传签名 → build APK → 上传到 release。
   android:
     needs: [check, desktop]
-    if: ${{ !cancelled() && needs.desktop.result == 'success' }}
+    if: ${{ !cancelled() && needs.desktop.result == 'success' && needs.check.outputs.android_signed == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -172,18 +173,20 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Init Android project
-        run: pnpm tauri android init
+      # 解码 keystore 到临时目录，路径经 ANDROID_KEYSTORE_PATH 传给 build.gradle.kts。
+      # 仓库内 secrets/keystore.properties 未随 CI 检出（已 .gitignore），gradle 自动回退到环境变量。
+      - name: Decode Android keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
-      - name: Setup Android signing
-        if: ${{ needs.check.outputs.android_signed == 'true' }}
+      - name: Build APK
         env:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
-        run: bash scripts/setup-android-signing.sh
-
-      - name: Build APK
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: pnpm tauri android build --apk
 
       - name: Upload APK to release
@@ -191,9 +194,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n1)
+          # 排除 release 未签名产物（app-*-release-unsigned.apk）：job 已守卫签名齐备，
+          # 正常只会有一个已签名的 universal release APK。
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' ! -name '*unsigned*' | head -n1)
           if [ -z "$APK" ]; then
-            echo "::error::未找到构建出的 APK"
+            echo "::error::未找到已签名的 APK（仅有未签名产物？请检查签名配置）"
             exit 1
           fi
           DEST="STerm_${TAG#v}_android.apk"
@@ -288,51 +293,137 @@ jobs:
           # run already created the draft, its body is stuck on whatever was there. Force it.
           gh release edit "$TAG" -R "$REPO" --notes "$BODY"
 
-      # 给桌面产物文件名加系统标识（tauri-action 上传时不含）。
+      # 给桌面产物文件名加系统和架构标识（tauri-action 上传时不含）。
       # 此 job needs: desktop，所有桌面 matrix 已完成，不会再有旧名文件上传；
       # 与并行的 android/ios 操作的是不同文件，互不冲突。
-      # sed 不加 $ 行尾锚，.sig 后缀会自动保留；latest.json 不匹配规则，留待后续删除。
+      # sed 不加 $ 行尾锚，.sig 后缀会自动随前缀一起重命名。
       - name: Rename desktop assets with OS tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
+          ASSET_VERSION="${TAG#v}"
           gh api "/repos/$REPO/releases/tags/$TAG" --jq '.assets[] | "\(.id)\t\(.name)"' |
           while IFS=$'\t' read -r id name; do
             new=$(printf '%s' "$name" | sed -E \
-              -e 's/^(STerm_[0-9][0-9.]*)_(aarch64|x64)\.dmg/\1_macos_\2.dmg/' \
-              -e 's/^(STerm_[0-9][0-9.]*)_(amd64)\.(AppImage|deb)/\1_linux_\2.\3/' \
-              -e 's/^(STerm_[0-9][0-9.]*)_(x64|arm64)-setup\.exe/\1_windows_\2-setup.exe/' \
-              -e 's/^(STerm)_(aarch64|x64)\.app\.tar\.gz/\1_macos_\2.app.tar.gz/')
+              -e "s#^STerm_[0-9][0-9.]*_aarch64\.dmg#STerm_${ASSET_VERSION}_macos_arm64.dmg#" \
+              -e "s#^STerm_[0-9][0-9.]*_x64\.dmg#STerm_${ASSET_VERSION}_macos_x64.dmg#" \
+              -e "s#^STerm_aarch64\.app\.tar\.gz#STerm_${ASSET_VERSION}_macos_arm64.app.tar.gz#" \
+              -e "s#^STerm_x64\.app\.tar\.gz#STerm_${ASSET_VERSION}_macos_x64.app.tar.gz#" \
+              -e "s#^STerm_[0-9][0-9.]*_amd64\.(AppImage|deb)#STerm_${ASSET_VERSION}_linux_x64.\1#" \
+              -e "s#^STerm_[0-9][0-9.]*_x64-setup\.nsis\.zip#STerm_${ASSET_VERSION}_windows_x64.nsis.zip#" \
+              -e "s#^STerm_[0-9][0-9.]*_arm64-setup\.nsis\.zip#STerm_${ASSET_VERSION}_windows_arm64.nsis.zip#" \
+              -e "s#^STerm_[0-9][0-9.]*_x64-setup\.exe#STerm_${ASSET_VERSION}_windows_x64.exe#" \
+              -e "s#^STerm_[0-9][0-9.]*_arm64-setup\.exe#STerm_${ASSET_VERSION}_windows_arm64.exe#")
             if [ "$new" != "$name" ]; then
               echo "rename: $name -> $new"
               gh api -X PATCH "/repos/$REPO/releases/assets/$id" -f name="$new" >/dev/null
             fi
           done
 
-      - name: Sync updater manifest to updater channel
+      - name: Generate updater manifest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          if ! gh release download "$TAG" -R "$REPO" -p "latest.json" -O latest.json; then
-            echo "::error::latest.json not found on release $TAG — no platform produced an updater manifest"
-            exit 1
-          fi
-          # 上一步已重命名更新载荷文件，latest.json 里的 URL 需同步改写，否则更新器会 404。
-          # latest.json 只含 tar.gz / setup.exe / AppImage 三类载荷 URL；base64 签名字段不含这些模式，g 全局替换安全。
-          sed -i -E \
-            -e 's#(STerm)_(aarch64|x64)\.app\.tar\.gz#\1_macos_\2.app.tar.gz#g' \
-            -e 's#(STerm_[0-9][0-9.]*)_(x64|arm64)-setup\.exe#\1_windows_\2-setup.exe#g' \
-            -e 's#(STerm_[0-9][0-9.]*)_(amd64)\.AppImage#\1_linux_\2.AppImage#g' \
-            latest.json
-          gh release view updater -R "$REPO" >/dev/null 2>&1 || \
+          set -euo pipefail
+          ASSET_VERSION="${TAG#v}"
+          VERSION="$ASSET_VERSION"
+          BODY=$(awk -v v="$VERSION" '
+            $1 == "##" && $2 == v { capture=1; next }
+            capture && $1 == "##" { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          [ -z "$BODY" ] && BODY="Release $VERSION"
+          export ASSET_VERSION RELEASE_NOTES="$BODY"
+          gh api "/repos/$REPO/releases/tags/$TAG" > release.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+
+          const repo = process.env.REPO;
+          const version = process.env.ASSET_VERSION;
+          const release = JSON.parse(fs.readFileSync('release.json', 'utf8'));
+          const assets = new Map(release.assets.map((asset) => [asset.name, asset]));
+          const platforms = {};
+          const missing = [];
+
+          function signatureFor(assetName) {
+            const sigName = `${assetName}.sig`;
+            const sigAsset = assets.get(sigName);
+            if (!sigAsset) {
+              throw new Error(`missing signature asset: ${sigName}`);
+            }
+            return execFileSync('gh', [
+              'api',
+              `/repos/${repo}/releases/assets/${sigAsset.id}`,
+              '-H',
+              'Accept: application/octet-stream',
+            ], { encoding: 'utf8' }).trim();
+          }
+
+          function add(keys, candidates) {
+            const asset = candidates.map((name) => assets.get(name)).find(Boolean);
+            if (!asset) {
+              missing.push(candidates.join(' or '));
+              return;
+            }
+            const entry = {
+              signature: signatureFor(asset.name),
+              url: asset.browser_download_url,
+            };
+            for (const key of keys) {
+              platforms[key] = entry;
+            }
+          }
+
+          add(['darwin-x86_64', 'darwin-x86_64-app'], [
+            `STerm_${version}_macos_x64.app.tar.gz`,
+          ]);
+          add(['darwin-aarch64', 'darwin-aarch64-app'], [
+            `STerm_${version}_macos_arm64.app.tar.gz`,
+          ]);
+          add(['windows-x86_64', 'windows-x86_64-nsis'], [
+            `STerm_${version}_windows_x64.nsis.zip`,
+            `STerm_${version}_windows_x64.exe`,
+          ]);
+          add(['windows-aarch64', 'windows-aarch64-nsis'], [
+            `STerm_${version}_windows_arm64.nsis.zip`,
+            `STerm_${version}_windows_arm64.exe`,
+          ]);
+          add(['linux-x86_64', 'linux-x86_64-appimage'], [
+            `STerm_${version}_linux_x64.AppImage.tar.gz`,
+            `STerm_${version}_linux_x64.AppImage`,
+          ]);
+
+          if (missing.length > 0) {
+            throw new Error(`missing updater payload asset(s): ${missing.join(', ')}`);
+          }
+
+          fs.writeFileSync(
+            'latest.json',
+            `${JSON.stringify({
+              version,
+              notes: process.env.RELEASE_NOTES || `Release ${version}`,
+              pub_date: new Date().toISOString(),
+              platforms,
+            }, null, 2)}\n`,
+          );
+          NODE
+          if gh release view updater -R "$REPO" >/dev/null 2>&1; then
+            gh release upload updater latest.json -R "$REPO" --clobber
+          else
             gh release create updater -R "$REPO" \
+              latest.json \
+              --target "$GITHUB_SHA" \
               --title "Updater Manifests" \
               --notes "Auto-maintained by CI. Hosts the updater JSON for STerm." \
               --latest=false
-          gh release upload updater latest.json -R "$REPO" --clobber
-          # latest.json 只是中间产物，自动更新读的是固定 updater release 那份，从版本 release 删掉。
-          gh release delete-asset "$TAG" latest.json -R "$REPO" --yes
+          fi
+          # 自动更新读的是固定 updater release 那份；版本 release 若残留旧 latest.json，则删除。
+          old_latest_id=$(gh api "/repos/$REPO/releases/tags/$TAG" --jq '.assets[] | select(.name == "latest.json") | .id' || true)
+          if [ -n "$old_latest_id" ]; then
+            gh api -X DELETE "/repos/$REPO/releases/assets/$old_latest_id" >/dev/null
+          fi

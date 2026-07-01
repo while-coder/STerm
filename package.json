@@ -9,6 +9,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "build:desktop": "tauri build",
+    "android:init": "tauri android init",
+    "android:dev": "tauri android dev",
+    "android:apk": "tauri android build --apk",
     "release": "node scripts/release.cjs"
   },
   "dependencies": {
