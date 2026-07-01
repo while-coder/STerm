@@ -16,7 +16,12 @@ jobs:
     outputs:
       ios: ${{ steps.detect.outputs.ios }}
       android_signed: ${{ steps.detect.outputs.android_signed }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      notes: ${{ steps.release.outputs.notes }}
     steps:
+      - uses: actions/checkout@v5
+
       - id: detect
         env:
           IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
@@ -33,8 +38,35 @@ jobs:
             echo "android_signed=false" >> "$GITHUB_OUTPUT"
           fi
 
-  # 桌面三平台（参照 sbox），同时负责创建 draft release。
+      # 统一解析 tag / version / notes：tag 推送用 ref_name；手动 workflow_dispatch
+      # 从 package.json 读版本构造 v<版本>。CHANGELOG 只在此解析一次，供后续所有 job 复用。
+      - id: release
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          else
+            VERSION="$(node -p "require('./package.json').version")"
+            TAG="v${VERSION}"
+          fi
+          BODY=$(awk -v v="$VERSION" '
+            $1 == "##" && $2 == v { capture=1; next }
+            capture && $1 == "##" { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          [ -z "$BODY" ] && BODY="Release $VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "notes<<RELEASE_NOTES_EOF"
+            echo "$BODY"
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  # 桌面五目标（参照 sbox），直接创建公开 release。
   desktop:
+    needs: check
     strategy:
       fail-fast: false
       matrix:
@@ -93,23 +125,6 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Extract release notes
-        id: notes
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          BODY=$(awk -v v="$VERSION" '
-            $1 == "##" && $2 == v { capture=1; next }
-            capture && $1 == "##" { exit }
-            capture { print }
-          ' CHANGELOG.md)
-          [ -z "$BODY" ] && BODY="Release $VERSION"
-          {
-            echo "body<<RELEASE_NOTES_EOF"
-            echo "$BODY"
-            echo "RELEASE_NOTES_EOF"
-          } >> "$GITHUB_OUTPUT"
-
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -118,7 +133,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: 'STerm v__VERSION__'
-          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseBody: ${{ needs.check.outputs.notes }}
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: false
@@ -192,7 +207,7 @@ jobs:
       - name: Upload APK to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.check.outputs.tag }}
         run: |
           # 排除 release 未签名产物（app-*-release-unsigned.apk）：job 已守卫签名齐备，
           # 正常只会有一个已签名的 universal release APK。
@@ -254,7 +269,7 @@ jobs:
       - name: Upload IPA to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.check.outputs.tag }}
         run: |
           IPA=$(find src-tauri/gen/apple/build -name '*.ipa' | head -n1)
           if [ -z "$IPA" ]; then
@@ -268,30 +283,23 @@ jobs:
   # 把桌面构建生成的 latest.json 同步到固定的 "updater" release，
   # 即 tauri.conf.json 中 updater endpoint 指向的地址。
   publish-manifest:
-    needs: desktop
+    needs: [check, desktop]
     if: ${{ !cancelled() && needs.desktop.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
       - name: Force release body from CHANGELOG
-        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.check.outputs.tag }}
+          RELEASE_NOTES: ${{ needs.check.outputs.notes }}
         shell: bash
         run: |
-          VERSION="${TAG#v}"
-          BODY=$(awk -v v="$VERSION" '
-            $1 == "##" && $2 == v { capture=1; next }
-            capture && $1 == "##" { exit }
-            capture { print }
-          ' CHANGELOG.md)
-          [ -z "$BODY" ] && BODY="Release $VERSION"
-          # tauri-action only sets the body when first creating the release; if an earlier
-          # run already created the draft, its body is stuck on whatever was there. Force it.
-          gh release edit "$TAG" -R "$REPO" --notes "$BODY"
+          # tauri-action 只在首次创建 release 时写 body；若已被某个 matrix run 创建，
+          # body 会停留在旧值，这里用统一解析出的 notes 强制刷新。
+          gh release edit "$TAG" -R "$REPO" --notes "$RELEASE_NOTES"
 
       # 给桌面产物文件名加系统和架构标识（tauri-action 上传时不含）。
       # 此 job needs: desktop，所有桌面 matrix 已完成，不会再有旧名文件上传；
@@ -301,9 +309,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.check.outputs.tag }}
+          ASSET_VERSION: ${{ needs.check.outputs.version }}
         run: |
-          ASSET_VERSION="${TAG#v}"
           gh api "/repos/$REPO/releases/tags/$TAG" --jq '.assets[] | "\(.id)\t\(.name)"' |
           while IFS=$'\t' read -r id name; do
             new=$(printf '%s' "$name" | sed -E \
@@ -326,18 +334,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.check.outputs.tag }}
+          ASSET_VERSION: ${{ needs.check.outputs.version }}
+          RELEASE_NOTES: ${{ needs.check.outputs.notes }}
         run: |
           set -euo pipefail
-          ASSET_VERSION="${TAG#v}"
-          VERSION="$ASSET_VERSION"
-          BODY=$(awk -v v="$VERSION" '
-            $1 == "##" && $2 == v { capture=1; next }
-            capture && $1 == "##" { exit }
-            capture { print }
-          ' CHANGELOG.md)
-          [ -z "$BODY" ] && BODY="Release $VERSION"
-          export ASSET_VERSION RELEASE_NOTES="$BODY"
           gh api "/repos/$REPO/releases/tags/$TAG" > release.json
           node <<'NODE'
           const fs = require('node:fs');
